@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>VoxCode Client</title>
+    <style>
+        body { font-family: monospace; background: #1e1e1e; color: #d4d4d4; padding: 20px; }
+        #status { color: #4ec9b0; }
+        #transcript { border: 1px solid #333; padding: 10px; height: 200px; overflow-y: auto; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <h1>VoxCode v1.0</h1>
+    <div id="status">Status: Disconnected</div>
+    <button id="start">Start Dictation</button>
+    <button id="stop" disabled>Stop</button>
+    <div id="transcript"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>
