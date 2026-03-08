@@ -4,12 +4,17 @@ let processor;
 let input;
 
 let audioChunks = [];
+let audioQueue = [];
+let isPlayingAudio = false;
+let currentAiDiv = null;
+let currentAudioSource = null;
 let preRollBuffer = [];
 let isSpeaking = false;
 let silenceFrames = 0;
+let wakeLock = null;
 
 const NOISE_THRESHOLD = 0.015; // RMS threshold. Increase if your room is noisy!
-const SILENCE_FRAMES_LIMIT = 3; // ~0.75 seconds of trailing silence to stop
+const SILENCE_FRAMES_LIMIT = 6; // ~0.75 seconds of trailing silence to stop
 const PRE_ROLL_FRAMES = 2; // ~0.5 seconds of audio to keep BEFORE speech is detected
 const MIN_CHUNKS = 2; // Require at least ~0.5 seconds of audio to bother sending
 
@@ -17,55 +22,82 @@ const status = document.getElementById('status');
 const startBtn = document.getElementById('start');
 const stopBtn = document.getElementById('stop');
 const transcript = document.getElementById('transcript');
-const ttsInput = document.getElementById('ttsInput');
-const testTtsBtn = document.getElementById('testTtsBtn');
+
+async function requestWakeLock() {
+    try {
+        if ('wakeLock' in navigator) {
+            wakeLock = await navigator.wakeLock.request('screen');
+            console.log('Wake Lock acquired');
+        }
+    } catch (err) {
+        console.error('Wake Lock error:', err);
+    }
+}
+
+async function releaseWakeLock() {
+    if (wakeLock !== null) {
+        await wakeLock.release();
+        wakeLock = null;
+        console.log('Wake Lock released');
+    }
+}
+
+document.addEventListener('visibilitychange', async () => {
+    if (wakeLock !== null && document.visibilityState === 'visible' && startBtn.disabled) {
+        await requestWakeLock();
+    }
+});
 
 startBtn.onclick = async () => {
-    socket = new WebSocket(`ws://${window.location.host}/ws`);
+    socket = new WebSocket(`wss://${window.location.host}/ws`);
     
     socket.onopen = () => {
         status.innerText = "Status: Connected - Listening...";
         startBtn.disabled = true;
         stopBtn.disabled = false;
+        requestWakeLock();
         startRecording();
     };
 
     socket.onmessage = async (event) => {
         // If the server sends us a Blob (Binary), it's Text-to-Speech audio!
         if (event.data instanceof Blob) {
-            try {
-                status.innerText = "Status: Playing Audio...";
-                if (!audioContext) {
-                    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-                }
-                if (audioContext.state === 'suspended') {
-                    await audioContext.resume();
-                }
-                const arrayBuffer = await event.data.arrayBuffer();
-                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-                const source = audioContext.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(audioContext.destination);
-                source.start(0);
-            } catch (err) {
-                console.error("Error decoding TTS audio:", err);
-            }
+            audioQueue.push(event.data);
+            if (!isPlayingAudio) playNextAudio();
             return;
         }
 
         // Otherwise, it's our transcribed text from Whisper
         status.innerText = "Status: Connected - Listening...";
-        if (!event.data.trim()) return; // Ignore empty text
         
-        const msg = document.createElement('div');
-        msg.innerText = `> ${event.data}`;
-        transcript.appendChild(msg);
+        const rawText = event.data;
+        const text = rawText.trim();
+        
+        if (text === "[AI_START]") {
+            currentAiDiv = document.createElement('div');
+            currentAiDiv.style.color = '#4ec9b0';
+            currentAiDiv.innerText = 'AI: ';
+            transcript.appendChild(currentAiDiv);
+            return;
+        } else if (text === "[AI_END]") {
+            currentAiDiv = null;
+            return;
+        }
+
+        if (currentAiDiv) {
+            currentAiDiv.innerText += rawText; // keep the spaces!
+        } else if (text) {
+            const msg = document.createElement('div');
+            msg.innerText = `> ${text}`;
+            transcript.appendChild(msg);
+        }
         transcript.scrollTop = transcript.scrollHeight;
     };
 
     socket.onclose = () => {
         status.innerText = "Status: Disconnected";
         stopRecording();
+        releaseWakeLock();
     };
 };
 
@@ -73,15 +105,49 @@ stopBtn.onclick = () => {
     socket.close();
     startBtn.disabled = false;
     stopBtn.disabled = true;
+    releaseWakeLock();
 };
 
-testTtsBtn.onclick = () => {
-    if (socket && socket.readyState === WebSocket.OPEN && ttsInput.value) {
-        // Send raw text to the server to trigger the TTS pipeline
-        socket.send(ttsInput.value);
-        ttsInput.value = '';
+async function playNextAudio() {
+    if (audioQueue.length === 0) {
+        isPlayingAudio = false;
+        status.innerText = "Status: Connected - Listening...";
+        return;
     }
-};
+    
+    isPlayingAudio = true;
+    status.innerText = "Status: Playing Audio...";
+    
+    if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    if (audioContext.state === 'suspended') await audioContext.resume();
+
+    try {
+        const blob = audioQueue.shift();
+        const arrayBuffer = await blob.arrayBuffer();
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+        const source = audioContext.createBufferSource();
+        currentAudioSource = source;
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+        source.onended = () => {
+            currentAudioSource = null;
+            playNextAudio();
+        }; // trigger the next chunk gaplessly!
+        source.start(0);
+    } catch (err) {
+        console.error("Error decoding TTS audio:", err);
+        playNextAudio();
+    }
+}
+
+function stopAudio() {
+    audioQueue = []; // Clear the pending playlist
+    if (currentAudioSource) {
+        try { currentAudioSource.stop(); } catch (e) {}
+        currentAudioSource = null;
+        isPlayingAudio = false;
+    }
+}
 
 async function startRecording() {
     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
@@ -109,6 +175,10 @@ async function startRecording() {
         if (rms > NOISE_THRESHOLD) {
             // Speech detected
             if (!isSpeaking) {
+                stopAudio(); // Instantly mute the AI
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send("[INTERRUPT]"); // Tell the server to kill the generation
+                }
                 status.innerText = "Status: Recording (Speaking)...";
                 isSpeaking = true;
                 // Prepend the pre-roll buffer to catch the very start of the word
