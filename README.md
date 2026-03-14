@@ -1,6 +1,6 @@
 # Speax: Low-Latency AI Voice router
 
-Speax is a local-first, privacy-conscious AI implementation. Designed for low-latency, real-time interaction, it aims to bridge the gap between powerful online LLMs and personal hardware with a focus on data sovereignty and conversational fluidity.
+Speax is a local-first, privacy-conscious AI voice router. Designed for low-latency, real-time interaction, it aims to bridge the gap between powerful online LLMs and personal hardware with a focus on data sovereignty and conversational fluidity. It's "side-project" that I spent a weekend on...
 
 ## Core Features
 *   **Low-Latency Pipeline:** Real-time bi-directional streaming via WebSockets with optimized chunking for gapless TTS.
@@ -13,7 +13,9 @@ Speax is a local-first, privacy-conscious AI implementation. Designed for low-la
 ## Tech Stack
 *   **Backend:** Go (Golang)
 *   **Web Frontend:** Vanilla HTML/CSS/JavaScript (No frameworks)
-*   **Android Client:** Native Kotlin
+*   **Android Client:** Native Kotlin, with minimal dependancies
+
+### Exernal tools
 *   **STT:** Whisper.cpp (Local) routing or Native Android / Web Recognition APIs
 *   **LLM:** Ollama (Local) or Google Gemini (Cloud) - with user-provided API keys
 *   **TTS:** Piper TTS (Local) routing for audio synthesis
@@ -23,8 +25,14 @@ Speax is a local-first, privacy-conscious AI implementation. Designed for low-la
 2.  **Web:** Serve the `./public` directory. Access on your local network (e.g., `https://<ip>:3000`).
 3.  **Android:** Open the `/android` directory in Android Studio and build to your device (or old-school CLI build, IDE's suck all the fun out of it)
 
+### Grab the dependacies for local-first, high-quality voice interactions
+1.  **whisper STT:** install or build whisper-server see [whisper.cpp](https://github.com/ggml-org/whisper.cpp), recommend the medium model for great voice recog if you have a half decent GPU available (runs flawlessly on an old 1080GTX) - building this is a little platform/hardware specific, see their readme.
+2.  **Piper TTS:** download the latest [Piper](https://github.com/rhasspy/piper/releases) binary for your platform, and a voice model [piper models](https://rhasspy.github.io/piper-samples/), put these in `/[project_root]/piper`
+3.  **ollama:** download [ollama](https://ollama.com/) for your platform and your preferred LLM (recommend LLama3 or Gemma3, which model variant is highly hardware dependant)
+
 ## Architecture Philosophy
-Speax is built on a "simple-is-better" approach. By keeping the core communications protocol (WebSockets + PCM audio) platform-agnostic, we maintain high compatibility and low overhead. Where low cost, self-hosted or free integrations are possible, they should be supported as first-class options.
+Speax is built on a "simple-is-better" approach. By keeping the core communications protocol (WebSockets + PCM audio) platform-agnostic, we maintain high compatibility and low overhead. 
+Where low cost, self-hosted or free integrations are possible, they should be supported as first-class options.
 
 ---
 *Built by jakbox.dev*
