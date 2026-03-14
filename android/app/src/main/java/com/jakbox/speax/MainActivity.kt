@@ -339,6 +339,11 @@ class MainActivity : ComponentActivity() {
                     // Error 8 (BUSY) means we tried to start it too fast.
                     if (error == SpeechRecognizer.ERROR_CLIENT) return
                     
+                    // False alarm! If we suspended TTS for a partial result, resume it!
+                    if ((isGeneratingAi || playbackProgress > 0f) && !isAiPaused) {
+                        audioEngine.resumePlayback()
+                    }
+
                     lifecycleScope.launch {
                         if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
                             delay(500) // Back off slightly more if it's choking
@@ -362,9 +367,9 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        if (isGeneratingAi && !isAiPaused) {
-                            Log.d("SpeaxNative", "Native STT Barge-in (Final)! Suspending TTS.")
-                            audioEngine.suspendPlayback()
+                        if ((isGeneratingAi || playbackProgress > 0f) && !isAiPaused) {
+                            Log.d("SpeaxNative", "Native STT Barge-in (Final)! Aborting TTS.")
+                            audioEngine.abortPlayback()
                         }
 
                         sendTextPrompt(text)
@@ -381,7 +386,7 @@ class MainActivity : ComponentActivity() {
                         statusText = "Hearing: $partialText" // Stream live to the UI!
                         
                         // True Barge-In: We successfully decoded actual words, so kill the AI playback!
-                        if (isGeneratingAi && !isAiPaused) {
+                        if ((isGeneratingAi || playbackProgress > 0f) && !isAiPaused) {
                             Log.d("SpeaxNative", "Native STT Barge-in (Partial)! Suspending TTS.")
                             audioEngine.suspendPlayback()
                         }

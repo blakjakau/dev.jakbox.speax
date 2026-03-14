@@ -248,7 +248,8 @@ if (isNativeSttSupported) {
         }
         
         // True Barge-in: Suspend TTS immediately if we hear words
-        if ((interimTranscript || finalTranscript) && isPlayingAudio && !isPaused) {
+        const isAiActive = (currentAiDiv !== null || isPlayingAudio);
+        if ((interimTranscript || finalTranscript) && isAiActive && !isPaused) {
             if (outContext && outContext.state === 'running') outContext.suspend();
         }
 
@@ -308,6 +309,7 @@ if (isNativeSttSupported) {
 function flushNativeSttBuffer() {
     if (nativeSttBuffer && serverClient && serverClient.isOpen()) {
         serverClient.send(`[TEXT_PROMPT]:${nativeSttBuffer}`);
+        stopAudio();
         status.innerText = `Heard: ${nativeSttBuffer}`;
         
         clearTimeout(statusResetTimeout);
@@ -316,7 +318,7 @@ function flushNativeSttBuffer() {
                 status.innerText = "Listening (Browser)...";
             }
         }, 3000);
-        } else if (!nativeSttBuffer && isPlayingAudio && !isPaused) {
+        } else if (!nativeSttBuffer && (currentAiDiv !== null || isPlayingAudio) && !isPaused) {
             // False alarm (e.g. cough or background noise): Resume TTS!
             if (outContext && outContext.state === 'suspended') {
                 outContext.resume();
@@ -831,6 +833,7 @@ function stopEverything() {
     stopRecording();
     stopNativeListening();
     flushNativeSttBuffer();
+    stopAudio();
 }
 
 pauseBtn.onclick = () => {
