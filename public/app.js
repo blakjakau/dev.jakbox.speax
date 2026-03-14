@@ -27,6 +27,16 @@ let isPaused = false;
 let lastSummaryData = { estTokens: 0, maxTokens: 8192, archiveTurns: 0, maxArchiveTurns: 100, text: "No summary generated yet." };
 let lastTokenUsage = {};
 
+// Web STT Engine States
+let recognition = null;
+let useNativeStt = false;
+let isRecognitionActive = false;
+let statusResetTimeout = null;
+let nativeSttBuffer = "";
+let nativeSttDebounceTimer = null;
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const isNativeSttSupported = !!SpeechRecognition;
+
 const NOISE_THRESHOLD = 0.015; // RMS threshold. Increase if your room is noisy!
 const SILENCE_FRAMES_LIMIT = 6; // ~0.75 seconds of trailing silence to stop
 const PRE_ROLL_FRAMES = 2; // ~0.5 seconds of audio to keep BEFORE speech is detected
@@ -125,6 +135,8 @@ const settingsSidebar = document.getElementById('settingsSidebar');
 const closeSettingsBtn = document.getElementById('closeSettingsBtn');
 const userName = document.getElementById('userName');
 const userBio = document.getElementById('userBio');
+const nativeSttContainer = document.getElementById('nativeSttContainer');
+const useNativeSttToggle = document.getElementById('useNativeSttToggle');
 const aiProvider = document.getElementById('aiProvider');
 const geminiSettings = document.getElementById('geminiSettings');
 const geminiApiKey = document.getElementById('geminiApiKey');
@@ -199,6 +211,120 @@ async function loadVoices() {
     } catch (e) {
         aiVoice.innerHTML = '<option value="">Error loading voices</option>';
     }
+}
+
+// Initialize Web Speech API if supported
+if (isNativeSttSupported) {
+    nativeSttContainer.style.display = 'flex';
+    useNativeStt = localStorage.getItem('speax_use_native_stt') !== 'false'; // Default true
+    useNativeSttToggle.checked = useNativeStt;
+
+    recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    recognition.onstart = () => {
+        isRecognitionActive = true;
+        if (!status.innerText.startsWith("Heard:")) {
+            status.innerText = "Listening (Browser)...";
+        }
+    };
+
+    recognition.onresult = (event) => {
+        let interimTranscript = '';
+        let finalTranscript = '';
+
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+            const text = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+                finalTranscript += text;
+            } else {
+                interimTranscript += text;
+            }
+        }
+
+        if (interimTranscript) {
+            status.innerText = `Hearing: ${interimTranscript}`;
+        }
+        
+        // True Barge-in: Suspend TTS immediately if we hear words
+        const isAiActive = (currentAiDiv !== null || isPlayingAudio);
+        if ((interimTranscript || finalTranscript) && isAiActive && !isPaused) {
+            if (outContext && outContext.state === 'running') outContext.suspend();
+        }
+
+        if (finalTranscript) {
+            const cleanText = finalTranscript.trim();
+            
+            if (nativeSttBuffer && cleanText.toLowerCase().startsWith(nativeSttBuffer.toLowerCase())) {
+                // Android Chrome Bug: The engine passes the entire cumulative sentence history 
+                // in the newest chunk instead of just the delta. We overwrite to prevent duplication.
+                nativeSttBuffer = cleanText;
+            } else {
+                // Desktop Chrome: Standard behavior, returns discrete new words.
+                nativeSttBuffer = nativeSttBuffer ? `${nativeSttBuffer} ${cleanText}` : cleanText;
+            }
+            
+            status.innerText = `Heard: ${nativeSttBuffer}`;
+        }
+
+        clearTimeout(nativeSttDebounceTimer);
+        nativeSttDebounceTimer = setTimeout(flushNativeSttBuffer, 1500);
+    };
+
+    recognition.onerror = (event) => {
+        if (event.error === 'not-allowed') {
+            useNativeStt = false;
+            useNativeSttToggle.checked = false;
+            localStorage.setItem('speax_use_native_stt', 'false');
+        }
+    };
+
+    recognition.onend = () => {
+        isRecognitionActive = false;
+        // Do NOT flush here! Let the debounce timer naturally stitch sentences together across Chrome disconnects.
+        // Auto-restart loop (like Android continuous dictation)
+        if (isDictationActive && !isMuted && !isPaused && useNativeStt && serverClient && serverClient.isOpen()) {
+            setTimeout(startNativeListening, 200);
+        }
+    };
+
+    useNativeSttToggle.onchange = (e) => {
+        useNativeStt = e.target.checked;
+        localStorage.setItem('speax_use_native_stt', useNativeStt);
+        
+        if (serverClient && serverClient.isOpen() && !isMuted && !isPaused) {
+            if (useNativeStt) {
+                stopRecording(); // Tear down custom VAD
+                startNativeListening();
+            } else {
+                stopNativeListening(); // Tear down Web STT
+                flushNativeSttBuffer();
+                startRecording();
+            }
+        }
+    };
+}
+
+function flushNativeSttBuffer() {
+    if (nativeSttBuffer && serverClient && serverClient.isOpen()) {
+        serverClient.send(`[TEXT_PROMPT]:${nativeSttBuffer}`);
+        stopAudio();
+        status.innerText = `Heard: ${nativeSttBuffer}`;
+        
+        clearTimeout(statusResetTimeout);
+        statusResetTimeout = setTimeout(() => {
+            if (status.innerText.startsWith("Heard:")) {
+                status.innerText = "Listening (Browser)...";
+            }
+        }, 3000);
+        } else if (!nativeSttBuffer && (currentAiDiv !== null || isPlayingAudio) && !isPaused) {
+            // False alarm (e.g. cough or background noise): Resume TTS!
+            if (outContext && outContext.state === 'suspended') {
+                outContext.resume();
+            }
+    }
+    nativeSttBuffer = "";
 }
 
 function closeDrawers() {
@@ -423,6 +549,19 @@ function renderMemoryTab() {
     `;
 }
 
+function startNativeListening() {
+    if (!recognition || !useNativeStt || isMuted || isPaused || !isDictationActive) return;
+    if (!isRecognitionActive) {
+        try { recognition.start(); } catch (e) {}
+    }
+}
+
+function stopNativeListening() {
+    if (!recognition) return;
+    try { recognition.stop(); } catch (e) {}
+    clearTimeout(nativeSttDebounceTimer);
+}
+
 const deviceInfo = await getDeviceInfo();
 
 serverClient = new ServerClient(
@@ -440,7 +579,11 @@ serverClient = new ServerClient(
             pauseBtn.classList.toggle('pressed', isPaused);
             reconnectDelay = 1000; 
             requestWakeLock();
-            if (!processor) startRecording(); 
+            if (useNativeStt) {
+                startNativeListening();
+            } else {
+                if (!processor) startRecording(); 
+            }
             
             if (memoryManager.isClientSide) {
                 // Rehydrate empty server memory with our local reality
@@ -452,6 +595,8 @@ serverClient = new ServerClient(
         onClose: () => {
             status.innerText = "Status: Disconnected";
             stopRecording();
+            stopNativeListening();
+            flushNativeSttBuffer(); // Don't lose the final thought!
             releaseWakeLock();
             
             if (isDictationActive) {
@@ -498,7 +643,6 @@ serverClient = new ServerClient(
                 loadModels().then(() => { if (s.model) aiModel.value = s.model; });
                 loadVoices().then(() => { if (s.voice) aiVoice.value = s.voice; });
             }
-            serverClient.sendSettings(getSettingsObj());
         },
         onThreadsSync: (data) => {
             const safeThreads = data.threads || [];
@@ -644,10 +788,13 @@ muteBtn.onclick = () => {
         muteBtn.classList.add('pressed');
         muteBtn.style.transform = 'scale(1)';
         muteBtn.style.boxShadow = 'none';
+        if (useNativeStt) stopNativeListening();
+        flushNativeSttBuffer();
         if (!isPlayingAudio && serverClient.isOpen()) status.innerText = "Status: Connected - Muted";
     } else {
         muteBtn.innerHTML = ICON_MIC;
         muteBtn.classList.remove('pressed');
+        if (useNativeStt && isDictationActive && !isPaused) startNativeListening();
         if (!isPlayingAudio && serverClient.isOpen()) {
             status.innerText = "Status: Connected - Listening...";
             if (!inputVisualizerId && inputAnalyser) renderInputVisualizer();
@@ -684,6 +831,9 @@ function stopEverything() {
     isPaused = false;
     releaseWakeLock();
     stopRecording();
+    stopNativeListening();
+    flushNativeSttBuffer();
+    stopAudio();
 }
 
 pauseBtn.onclick = () => {
@@ -693,12 +843,15 @@ pauseBtn.onclick = () => {
         pauseBtn.classList.add('pressed');
         if (outContext && outContext.state === 'running') outContext.suspend();
         if (!isMuted) muteBtn.click(); // Mute mic
+        if (useNativeStt) stopNativeListening();
+        flushNativeSttBuffer(); // Force send any pending thoughts
         if (audioChunks.length > 0) sendAndClearBuffer(); // Flush any pending audio
         status.innerText = "Status: Paused";
     } else {
         pauseBtn.innerHTML = ICON_PAUSE;
         pauseBtn.classList.remove('pressed');
         if (outContext && outContext.state === 'suspended') outContext.resume();
+        if (useNativeStt && !isMuted && isDictationActive) startNativeListening();
         if (isMuted) muteBtn.click(); // Unmute mic
         if (!isPlayingAudio && audioQueue.length > 0) playNextAudio(); // Drain the accumulated buffer
         if (isPlayingAudio && !progressAnimId) updateProgressBar(); // Resume progress UI
@@ -839,15 +992,17 @@ function renderVisualizer() {
 function stopAudio() {
     audioQueue = []; // Clear the pending playlist
     if (currentAudioSource) {
+        currentAudioSource.onended = null; // Prevent race condition injecting time into the next AI generation!
         try { currentAudioSource.stop(); } catch (e) {}
         currentAudioSource = null;
-        isPlayingAudio = false;
-            currentVisualPercent = 0;
-            progressBar.style.transition = 'none';
-        progressBar.style.width = '0%';
-        aiAudioTotalSecs = 0;
-        aiAudioPlayedSecs = 0;
     }
+    isPlayingAudio = false;
+    currentVisualPercent = 0;
+    progressBar.style.transition = 'none';
+    progressBar.style.width = '0%';
+    aiAudioTotalSecs = 0;
+    aiAudioPlayedSecs = 0;
+
     if (outContext && outContext.state === 'suspended') {
         outContext.resume(); // Ensure it isn't locked up for the new response
     }

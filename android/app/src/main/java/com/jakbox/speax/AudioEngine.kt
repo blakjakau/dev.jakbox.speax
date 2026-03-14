@@ -288,6 +288,9 @@ class AudioEngine(
         // Write in exactly 512-byte blocks (16ms) to feed the Jetpack Compose visualizer at exactly 60fps!
         val chunkSize = 512 
         while (offset < pcmData.size) {
+            // The Guillotine: If an abort was triggered, instantly exit this chunk to prevent "ghost audio"
+            if (Thread.currentThread().isInterrupted) break
+
             // If VAD tripped, lock the thread here so we don't throw away data!
             if (isPausedLocally) {
                 try {
@@ -341,6 +344,9 @@ class AudioEngine(
     fun abortPlayback() {
         isPausedLocally = false
         audioQueue.clear() // Drop all pending TTS chunks
+        // KILL the playback thread so it instantly drops the CURRENT chunk!
+        playbackThread?.interrupt()
+        playbackThread = null
         audioTrack?.pause()
         audioTrack?.flush()
         totalAiFrames = 0

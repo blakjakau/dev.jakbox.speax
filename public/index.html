@@ -128,6 +128,13 @@
         <label>Short Bio (Max 500 chars):</label>
         <textarea id="userBio" maxlength="500" placeholder="e.g. I prefer concise code in Go and Vanilla JS." style="resize: vertical; min-height: 60px;"></textarea>
 
+        <div id="nativeSttContainer" style="display: none; flex-direction: column; gap: 5px; margin-top: 15px;">
+            <label style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;">
+                Use Browser STT:
+                <input type="checkbox" id="useNativeSttToggle" style="width: 18px; height: 18px; cursor: pointer;">
+            </label>
+        </div>
+
         <label style="margin-top: 10px;">AI Provider:</label>
         <select id="aiProvider">
             <option value="ollama">Local (Ollama)</option>
@@ -161,6 +168,6 @@
         <button id="menuLogoutBtn" class="btn-danger" style="margin-top: 10px;">Logout</button>
     </div>
 
-    <script type="module" src="app.js"></script>
+    <script type="module" src="app.js?1"></script>
 </body>
 </html>

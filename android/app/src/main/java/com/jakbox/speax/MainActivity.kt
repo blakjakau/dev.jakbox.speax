@@ -10,10 +10,14 @@ import android.os.PowerManager
 import android.webkit.CookieManager
 import android.media.AudioManager
 import android.media.AudioDeviceInfo
+import android.media.MediaRecorder
 import android.os.Build
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.view.KeyEvent
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.activity.ComponentActivity
 import androidx.lifecycle.lifecycleScope
@@ -64,6 +68,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -75,7 +81,7 @@ data class ThreadItem(val id: String, val name: String)
 class MainActivity : ComponentActivity() {
 
     private var speaxWebSocket: SpeaxWebSocket? = null
-    private lateinit var audioEngine: AudioEngine
+    lateinit var audioEngine: AudioEngine
     private val httpClient = OkHttpClient()
     private var mediaSession: MediaSession? = null
 
@@ -105,6 +111,8 @@ class MainActivity : ComponentActivity() {
     var userName by mutableStateOf("")
     var userBio by mutableStateOf("")
     var googleName by mutableStateOf("")
+    var useNativeStt by mutableStateOf(false)
+    var isNativeSttSupported by mutableStateOf(false)
 
     // Memory & Thread State
     var memorySummary by mutableStateOf("No summary generated yet.")
@@ -119,6 +127,10 @@ class MainActivity : ComponentActivity() {
 
     // Auth State
     var sessionCookie by mutableStateOf<String?>(null)
+
+    // Native STT
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var nativeSttIntent: Intent? = null
 
     private var isAppInForeground = false
 
@@ -144,6 +156,9 @@ class MainActivity : ComponentActivity() {
         userName = prefs.getString("user_name", "") ?: ""
         userBio = prefs.getString("user_bio", "") ?: ""
         googleName = prefs.getString("google_name", "") ?: ""
+        
+        isNativeSttSupported = SpeechRecognizer.isRecognitionAvailable(this)
+        useNativeStt = prefs.getBoolean("use_native_stt", isNativeSttSupported) // Default to true if hardware supports it
 
         // 1. Initialize Audio Engine
         audioEngine = AudioEngine(onSpeechFinalized = { pcmData ->
@@ -180,6 +195,7 @@ class MainActivity : ComponentActivity() {
         handleIntent(intent)
 
         setupMediaSession()
+        setupSpeechRecognizer()
 
         // 3. Render UI
         setContent {
@@ -282,6 +298,136 @@ class MainActivity : ComponentActivity() {
         mediaSession?.setPlaybackState(playbackState)
     }
 
+    private fun setupSpeechRecognizer() {
+        if (SpeechRecognizer.isRecognitionAvailable(this)) {
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+            nativeSttIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                
+                // Use STT-optimized mic preset (prevents aggressive VOIP noise-gating from swallowing words)
+                putExtra("android.speech.extra.AUDIO_SOURCE", MediaRecorder.AudioSource.VOICE_RECOGNITION)
+                // Request continuous dictation mode (respected by many OEMs)
+                putExtra("android.speech.extra.DICTATION_MODE", true)
+                // Force the engine to wait much longer before deciding a sentence is "complete"
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 5000L)
+            }
+
+            speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) { 
+                    if (!statusText.startsWith("Heard:")) {
+                        statusText = "Listening (Native)..." 
+                    }
+                }
+                
+                override fun onBeginningOfSpeech() {
+                    statusText = "Recording (Speaking)..."
+                }
+                override fun onRmsChanged(rmsdB: Float) {
+                    if (isAppInForeground) {
+                    // Map native dB (-2 to 10) to our visualizer's linear RMS (0 to ~4000)
+                        currentRms = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f) * 2500f
+                    }
+                }
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() {} // Let the "Hearing: ..." live text linger until results arrive!
+                override fun onError(error: Int) {
+                    // Error 5 (CLIENT) means we intentionally cancelled it.
+                    // Error 8 (BUSY) means we tried to start it too fast.
+                    if (error == SpeechRecognizer.ERROR_CLIENT) return
+                    
+                    // False alarm! If we suspended TTS for a partial result, resume it!
+                    if ((isGeneratingAi || playbackProgress > 0f) && !isAiPaused) {
+                        audioEngine.resumePlayback()
+                    }
+
+                    lifecycleScope.launch {
+                        if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                            delay(500) // Back off slightly more if it's choking
+                        }
+                        delay(200) // Small backoff to prevent CPU-pegging restart loops
+                        restartNativeListening()
+                    }
+                }
+                override fun onResults(results: Bundle?) {
+                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    if (!matches.isNullOrEmpty() && matches[0].isNotBlank()) {
+                        val text = matches[0]
+                        Log.d("SpeaxNative", "Native STT Final: $text")
+                        
+                        statusText = "Heard: $text"
+                        lifecycleScope.launch {
+                            delay(3000)
+                            // Only revert if a new state (like AI speaking or user talking again) hasn't already taken over
+                            if (statusText.startsWith("Heard:")) {
+                                statusText = "Listening (Native)..."
+                            }
+                        }
+
+                        if ((isGeneratingAi || playbackProgress > 0f) && !isAiPaused) {
+                            Log.d("SpeaxNative", "Native STT Barge-in (Final)! Aborting TTS.")
+                            audioEngine.abortPlayback()
+                        }
+
+                        sendTextPrompt(text)
+                    }
+                    lifecycleScope.launch {
+                        delay(100)
+                        restartNativeListening()
+                    }
+                }
+                override fun onPartialResults(partialResults: Bundle?) {
+                    val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    if (!matches.isNullOrEmpty() && matches[0].isNotBlank()) {
+                        val partialText = matches[0]
+                        statusText = "Hearing: $partialText" // Stream live to the UI!
+                        
+                        // True Barge-In: We successfully decoded actual words, so kill the AI playback!
+                        if ((isGeneratingAi || playbackProgress > 0f) && !isAiPaused) {
+                            Log.d("SpeaxNative", "Native STT Barge-in (Partial)! Suspending TTS.")
+                            audioEngine.suspendPlayback()
+                        }
+                    }
+                }
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
+        }
+    }
+
+    private fun restartNativeListening() {
+        if (isConnected && !isMicMuted && useNativeStt) {
+            runOnUiThread {
+                speechRecognizer?.cancel()
+                speechRecognizer?.startListening(nativeSttIntent)
+            }
+        }
+    }
+
+    private fun stopNativeListening() {
+        runOnUiThread {
+            speechRecognizer?.cancel()
+            currentRms = 0f
+        }
+    }
+
+    fun swapSttEngine(useNative: Boolean) {
+        useNativeStt = useNative
+        saveSettingsLocal()
+        
+        if (isConnected && !isMicMuted) {
+            if (useNative) {
+                audioEngine.stopRecording()
+                restartNativeListening()
+            } else {
+                stopNativeListening()
+                audioEngine.startRecording()
+            }
+        }
+    }
+
     fun saveSettingsLocal() {
         getSharedPreferences("speax_prefs", Context.MODE_PRIVATE).edit().apply {
             putString("provider", aiProvider)
@@ -291,6 +437,7 @@ class MainActivity : ComponentActivity() {
             putString("user_name", userName)
             putString("user_bio", userBio)
             putString("google_name", googleName)
+            putBoolean("use_native_stt", useNativeStt)
         }.apply()
 	}
 
@@ -445,8 +592,13 @@ class MainActivity : ComponentActivity() {
         // The server is the single source of truth for cross-device sessions
         speaxWebSocket?.sendText("[REQUEST_SYNC]")
 
-        audioEngine.startRecording()
         isConnected = true
+
+        if (useNativeStt) {
+            restartNativeListening()
+        } else {
+            audioEngine.startRecording()
+        }
         statusText = "Listening..."
         updateBackgroundService()
         updateMediaSessionState()
@@ -633,7 +785,18 @@ class MainActivity : ComponentActivity() {
     fun toggleMicMute() {
         isMicMuted = !isMicMuted
         Log.d("SpeaxUI", "Mic Muted State: $isMicMuted")
-        audioEngine.isMicMuted = isMicMuted
+        
+        if (useNativeStt) {
+            if (isMicMuted) {
+                stopNativeListening()
+                statusText = "Muted"
+            } else {
+                restartNativeListening()
+            }
+        } else {
+            audioEngine.isMicMuted = isMicMuted
+        }
+        
         updateBackgroundService()
     }
 
@@ -643,10 +806,12 @@ class MainActivity : ComponentActivity() {
             audioEngine.suspendPlayback()
             isMicMuted = true
             audioEngine.isMicMuted = true
+            if (useNativeStt) stopNativeListening()
         } else {
             audioEngine.resumePlayback()
             isMicMuted = false
             audioEngine.isMicMuted = false
+            if (useNativeStt) restartNativeListening()
         }
         updateBackgroundService()
         updateMediaSessionState()
@@ -682,6 +847,7 @@ class MainActivity : ComponentActivity() {
         speaxWebSocket?.disconnect()
         speaxWebSocket = null
         audioEngine.abortPlayback()
+        stopNativeListening()
         audioEngine.stopRecording()
         isConnected = false
         statusText = "Disconnected"
@@ -727,6 +893,7 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         audioEngine.stopRecording()
         disconnectWebSocket()
+        speechRecognizer?.destroy()
         mediaSession?.release()
     }
 }
@@ -844,6 +1011,19 @@ fun ChatScreen() {
                         maxLines = 3
                     )
                     Spacer(Modifier.height(24.dp))
+
+                    // Native STT Toggle
+                    if (mainActivity.isNativeSttSupported) {
+                        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("Use Native Device STT", color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+                            Switch(
+                                checked = mainActivity.useNativeStt,
+                                onCheckedChange = { isNative -> mainActivity.swapSttEngine(isNative) },
+                                colors = SwitchDefaults.colors(checkedThumbColor = MaterialTheme.colorScheme.primary, checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                            )
+                        }
+                        Spacer(Modifier.height(16.dp))
+                    }
 
                     Text("AI Provider", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                     Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
