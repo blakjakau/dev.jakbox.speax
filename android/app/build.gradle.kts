@@ -13,6 +13,7 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+        manifestPlaceholders["androidx.startup.InitializationProvider"] = "androidx.startup.InitializationProvider"
     }
 
     buildFeatures {
@@ -27,6 +28,12 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
+    }
+    
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 }
 
@@ -43,4 +50,7 @@ dependencies {
     
     // The mighty OkHttp for our WebSocket
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Sherpa-ONNX for native in-memory Piper TTS
+    implementation(files("libs/sherpa-onnx-1.10.38.aar"))
 }

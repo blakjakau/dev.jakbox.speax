@@ -141,7 +141,8 @@ input::placeholder, textarea::placeholder { color: var(--slate-high); }
 .sidebar {
     position: fixed; top: 0; height: 100%; background: var(--slate-deep);
     transition: right 0.3s ease, left 0.3s ease; z-index: 200; padding: 20px; box-sizing: border-box;
-    display: flex; flex-direction: column; gap: 15px; box-shadow: 0 0 15px rgba(0,0,0,0.5); width: 300px;
+    display: flex; flex-direction: column; flex-shrink: 0; gap: 15px; box-shadow: 0 0 15px rgba(0,0,0,0.5); width: 300px;
+    overflow-y: auto;
 }
 .sidebar-header { display: flex; justify-content: space-between; align-items: center; }
 .btn-close { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--text-soft); padding: 0; margin: 0; min-width: auto; width: auto; }

@@ -14,6 +14,7 @@
         android:label="Speax"
         android:supportsRtl="true"
         android:icon="@mipmap/ic_launcher"
+        android:extractNativeLibs="true"
 		android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
         android:usesCleartextTraffic="true"> <!-- Needed if talking to local http/ws -->

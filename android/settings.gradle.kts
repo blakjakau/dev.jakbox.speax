@@ -3,6 +3,7 @@ pluginManagement {
         google()
         mavenCentral()
         gradlePluginPortal()
+        maven { url = uri("https://k2-fsa.github.io/sherpa-onnx/pkg/") }
     }
 }
 dependencyResolutionManagement {
@@ -13,4 +14,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "Speax"
-include(":app")
+include(":app") 

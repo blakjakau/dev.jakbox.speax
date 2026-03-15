@@ -15,6 +15,7 @@ import android.os.Build
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.view.KeyEvent
+import java.io.File
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -43,9 +44,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Mic
@@ -54,6 +53,8 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PowerOff
+import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -71,9 +72,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import com.k2fsa.sherpa.onnx.OfflineTts
+import com.k2fsa.sherpa.onnx.OfflineTtsConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
 
 data class UiMessage(val role: String, val content: String)
 data class ThreadItem(val id: String, val name: String)
@@ -113,6 +120,7 @@ class MainActivity : ComponentActivity() {
     var googleName by mutableStateOf("")
     var useNativeStt by mutableStateOf(false)
     var isNativeSttSupported by mutableStateOf(false)
+    var useLocalTts by mutableStateOf(false)
 
     // Memory & Thread State
     var memorySummary by mutableStateOf("No summary generated yet.")
@@ -134,12 +142,14 @@ class MainActivity : ComponentActivity() {
 
     private var isAppInForeground = false
 
+    private lateinit var piperEngine: PiperEngine
+    private val piperMutex = Mutex() // Ensures we only synthesize one sentence at a time (saves CPU)
+
     private val serverUrl = "wss://speax.jakbox.dev/ws"
     private val authUrl = "https://speax.jakbox.dev/auth/login?client=android"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         // Enable edge-to-edge so Compose can detect and measure the keyboard (IME)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         
@@ -159,6 +169,13 @@ class MainActivity : ComponentActivity() {
         
         isNativeSttSupported = SpeechRecognizer.isRecognitionAvailable(this)
         useNativeStt = prefs.getBoolean("use_native_stt", isNativeSttSupported) // Default to true if hardware supports it
+        useLocalTts = prefs.getBoolean("use_local_tts", false)
+
+        // 0. Initialize Edge TTS Pipeline
+        piperEngine = PiperEngine(this)
+        lifecycleScope.launch(Dispatchers.IO) {
+            piperEngine.initEngine()
+        }
 
         // 1. Initialize Audio Engine
         audioEngine = AudioEngine(onSpeechFinalized = { pcmData ->
@@ -438,6 +455,7 @@ class MainActivity : ComponentActivity() {
             putString("user_bio", userBio)
             putString("google_name", googleName)
             putBoolean("use_native_stt", useNativeStt)
+            putBoolean("use_local_tts", useLocalTts)
         }.apply()
 	}
 
@@ -452,6 +470,7 @@ class MainActivity : ComponentActivity() {
             put("model", aiModel)
             put("voice", aiVoice)
             put("clientStorage", false)
+            put("clientTts", useLocalTts)
         }
         speaxWebSocket?.sendText("[SETTINGS]$settingsJson")
     }
@@ -486,24 +505,47 @@ class MainActivity : ComponentActivity() {
     }
     
     fun fetchVoices() {
+        val isLocal = useLocalTts // Capture state synchronously before background thread
+        Log.d("SpeaxVoices", "fetchVoices triggered! isLocalTTS=$isLocal")      
         isLoadingVoices = true
-        val url = "https://speax.jakbox.dev/api/voices"
         
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val request = Request.Builder().url(url).build()
-                val response = httpClient.newCall(request).execute()
-                if (response.isSuccessful) {
-                    val jsonStr = response.body?.string() ?: "[]"
-                    val jsonArray = org.json.JSONArray(jsonStr)
-                    val voices = mutableListOf<String>()
-                    for (i in 0 until jsonArray.length()) {
-                        voices.add(jsonArray.getString(i).replace(".onnx", ""))
+                val voices = mutableListOf<String>()
+                
+                if (isLocal) {
+                    // Wait for PiperEngine to finish extracting assets on first boot!
+                    var retries = 0
+                    while (!piperEngine.isReady && retries < 40) {
+                        kotlinx.coroutines.delay(250)
+                        retries++
                     }
-                    withContext(Dispatchers.Main) {
-                        availableVoices.clear()
-                        availableVoices.addAll(voices)
+
+                    // Recursively scan local device storage for .onnx models
+                    val piperDir = File(filesDir, "piper_env")
+                    val onnxFiles = piperDir.walkTopDown()
+                        .filter { it.isFile && it.name.endsWith(".onnx") }
+                        .toList()
+					Log.d("SpeaxVoices", "Local scan complete. Found ${onnxFiles.size} models: ${onnxFiles.map { it.name }}")
+                    voices.addAll(onnxFiles.map { it.name.replace(".onnx", "") }.distinct())
+                } else {
+                    Log.d("SpeaxVoices", "Fetching remote models from server...")
+                    // Fetch available models from the remote Go Server
+                    val url = "https://speax.jakbox.dev/api/voices"
+                    val request = Request.Builder().url(url).build()
+                    val response = httpClient.newCall(request).execute()
+                    if (response.isSuccessful) {
+                        val jsonStr = response.body?.string() ?: "[]"
+                        val jsonArray = org.json.JSONArray(jsonStr)
+                        for (i in 0 until jsonArray.length()) {
+                            voices.add(jsonArray.getString(i).replace(".onnx", ""))
+                        }
                     }
+                }
+                
+                withContext(Dispatchers.Main) {
+                    availableVoices.clear()
+                    availableVoices.addAll(voices)
                 }
             } catch (e: Exception) { Log.e("MainActivity", "Error fetching voices", e) }
             finally { withContext(Dispatchers.Main) { isLoadingVoices = false } }
@@ -675,11 +717,25 @@ class MainActivity : ComponentActivity() {
                             }
                             saveSettingsLocal()
                             fetchModels()
+                            fetchVoices() 
+                        }
+                    }
+                }
+                text.startsWith("[TTS_CHUNK]") -> {
+                    val chunk = text.removePrefix("[TTS_CHUNK]")
+                    if (useLocalTts) {
+                        lifecycleScope.launch(Dispatchers.IO) {
+                            piperMutex.withLock {
+                                val audioBytes = piperEngine.synthesize(chunk, aiVoice)
+                                if (audioBytes != null && audioBytes.isNotEmpty()) {
+                                    audioEngine.playAudioChunk(audioBytes)
+                                }
+                            }
                         }
                     }
                 }
                 text.startsWith("[SUMMARY]") -> {
-                    var parsedSummary = "No summary generated yet."
+                    var parsedSummary: String
                     var pArchive = 0
                     var pMaxArchive = 100
                     var pEstTokens = 0
@@ -898,6 +954,138 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+class PiperEngine(private val context: Context) {
+    private val piperDir = File(context.filesDir, "piper_env")
+    
+    private var tts: OfflineTts? = null
+    private var currentVoice: String = ""
+
+    var isReady = false
+        private set
+
+    fun initEngine() {
+        try {
+            // Extract the contents of assets/piper/ to filesDir/piper_env/
+            copyAssetFolder(context.assets, "piper", piperDir.absolutePath)
+            isReady = true
+            Log.d("PiperEngine", "Local Piper Engine initialized successfully.")
+        } catch (e: Exception) {
+            Log.e("PiperEngine", "Failed to initialize Piper", e)
+        }
+    }
+
+    private fun copyAssetFolder(assetManager: android.content.res.AssetManager, fromAssetPath: String, toPath: String) {
+        val file = File(toPath)
+        val assets = assetManager.list(fromAssetPath) ?: return
+        
+        if (assets.isEmpty()) {
+            // It's a file, copy it
+            if (!file.exists() || file.length() == 0L) {
+                file.parentFile?.mkdirs()
+                assetManager.open(fromAssetPath).use { inputStream ->
+                    file.outputStream().use { outputStream ->
+                        inputStream.copyTo(outputStream)
+                    }
+                }
+            }
+        } else {
+            // It's a directory, create it and recurse
+            file.mkdirs()
+            for (asset in assets) {
+                copyAssetFolder(assetManager, "$fromAssetPath/$asset", "$toPath/$asset")
+            }
+        }
+    }
+
+    fun synthesize(text: String, voice: String): ByteArray? {
+        if (!isReady || text.isBlank()) return null
+        try {
+            Log.d("SpeaxLocalTTS", "Attempting to synthesize chunk locally: '$text'")
+            
+            val modelName = if (voice.isNotBlank()) voice else "en_GB-alba-medium.onnx"
+            val modelFile = piperDir.walkTopDown().firstOrNull { it.isFile && it.name == modelName }
+            
+            if (modelFile == null) {
+                Log.e("SpeaxLocalTTS", "Model file not found locally: $modelName")
+                return null
+            }
+            
+            // Check alongside the model first, fallback to root if needed
+            var espeakDataDir = File(modelFile.parentFile, "espeak-ng-data")
+            if (!espeakDataDir.exists() || !espeakDataDir.isDirectory) {
+                espeakDataDir = File(piperDir, "espeak-ng-data")
+            }
+            if (!espeakDataDir.exists() || !espeakDataDir.isDirectory) {
+                Log.e("SpeaxLocalTTS", "CRITICAL FATAL: espeak-ng-data folder not found! C++ Engine will crash. Aborting.")
+                return null
+            }
+            
+            val phondataFile = File(espeakDataDir, "phondata")
+            if (!phondataFile.exists() || phondataFile.length() == 0L) {
+                Log.e("SpeaxLocalTTS", "CRITICAL FATAL: espeak-ng-data/phondata is missing or empty! Extraction failed. Aborting.")
+                return null
+            }
+
+            // Initialize or swap models dynamically!
+            if (tts == null || currentVoice != voice) {
+                tts?.release()
+                
+                // Sherpa models come with their own perfect tokens.txt file!
+                val tokensFile = File(modelFile.parentFile, "tokens.txt")
+                
+                if (!tokensFile.exists() || tokensFile.length() == 0L) {
+                    Log.e("SpeaxLocalTTS", "CRITICAL FATAL: tokens.txt is missing from the model directory! Aborting.")
+                    return null
+                }
+                
+                Log.d("SpeaxLocalTTS", "JNI INIT: Model=${modelFile.absolutePath} (Size: ${modelFile.length()} bytes)")
+                Log.d("SpeaxLocalTTS", "JNI INIT: Tokens=${tokensFile.absolutePath} (Size: ${tokensFile.length()} bytes)")
+                Log.d("SpeaxLocalTTS", "JNI INIT: DataDir=${espeakDataDir.absolutePath} (phondata Size: ${phondataFile.length()} bytes)")
+
+                val config = OfflineTtsConfig(
+                    model = OfflineTtsModelConfig(
+                        vits = OfflineTtsVitsModelConfig(
+                            model = modelFile.absolutePath,
+                            lexicon = "", // Not needed for espeak Piper models
+                            tokens = if (tokensFile.exists()) tokensFile.absolutePath else "",
+                            dataDir = espeakDataDir.parentFile?.absolutePath ?: piperDir.absolutePath, 
+                            noiseScale = 0.667f,
+                            noiseScaleW = 0.8f,
+                            lengthScale = 1.0f
+                        ),
+                        numThreads = 1,
+                        debug = true, // Force C++ Engine to print to Logcat!
+                        provider = "cpu"
+                    )
+                )
+                Log.d("SpeaxLocalTTS", "JNI INIT: Calling OfflineTts constructor...")
+                tts = OfflineTts(config = config)
+                Log.d("SpeaxLocalTTS", "JNI INIT: Constructor successful!")
+                currentVoice = voice
+            }
+            
+            Log.d("SpeaxLocalTTS", "JNI GENERATE: Sending text to C++ engine...")
+            val audio = tts?.generate(text) ?: return null
+            Log.d("SpeaxLocalTTS", "JNI GENERATE: C++ engine returned audio successfully!")
+
+            val samples = audio.samples
+            val pcmBytes = ByteArray(samples.size * 2)
+            for (i in samples.indices) {
+                var sample = (samples[i] * 32767.0f).toInt()
+                sample = sample.coerceIn(-32768, 32767)
+                pcmBytes[i * 2] = (sample and 0xFF).toByte()
+                pcmBytes[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
+            }
+            
+            Log.d("SpeaxLocalTTS", "Success! Generated ${pcmBytes.size} bytes of audio.")
+            return pcmBytes
+        } catch (e: Exception) {
+            Log.e("SpeaxLocalTTS", "Synthesis crashed unexpectedly: ${e.message}", e)
+            return null
+        }
+    }
+}
+
 private val DarkColors = darkColorScheme(
     background = Color(0xFF030B17),      // Slate Deep (Depressed/Shadows)
     surface = Color(0xFF0B1E36),         // Slate Mid (Cards/Surfaces)
@@ -1024,6 +1212,21 @@ fun ChatScreen() {
                         }
                         Spacer(Modifier.height(16.dp))
                     }
+
+                    // Local TTS Toggle
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Use Local TTS (Piper)", color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = mainActivity.useLocalTts,
+                            onCheckedChange = { isLocal -> 
+                                mainActivity.useLocalTts = isLocal
+                                mainActivity.pushSettingsToServer()
+                                mainActivity.fetchVoices() 
+                            },
+                            colors = SwitchDefaults.colors(checkedThumbColor = MaterialTheme.colorScheme.primary, checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                        )
+                    }
+                    Spacer(Modifier.height(16.dp))
 
                     Text("AI Provider", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                     Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1183,7 +1386,7 @@ fun ChatScreen() {
                                 tonalElevation = 0.dp
                             ) {
                                 val tabs = listOf("Home", "Thread", "Memory")
-                                val tabIcons = listOf(Icons.Filled.Home, Icons.Filled.List, Icons.Filled.Memory)
+                                val tabIcons = listOf(Icons.Filled.Home, Icons.AutoMirrored.Filled.List, Icons.Filled.Memory)
                                 tabs.forEachIndexed { index, title ->
                                     NavigationBarItem(
                                         icon = { Icon(tabIcons[index], contentDescription = title) },
@@ -1210,7 +1413,7 @@ fun ChatScreen() {
                             containerColor = MaterialTheme.colorScheme.surfaceVariant,
                             contentColor = MaterialTheme.colorScheme.onSurface
                         ) {
-                            Icon(Icons.Filled.Chat, contentDescription = "Threads")
+                            Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = "Threads")
                         }
                     }
                 },

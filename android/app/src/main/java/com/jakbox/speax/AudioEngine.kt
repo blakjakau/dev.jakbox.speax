@@ -35,7 +35,7 @@ class AudioEngine(
     private var echoCanceler: AcousticEchoCanceler? = null
     private var autoGainControl: AutomaticGainControl? = null
     private var progressThread: Thread? = null
-    private val audioQueue = LinkedBlockingQueue<ByteArray>()
+    private val audioQueue = LinkedBlockingQueue<Pair<ByteArray, Int>>()
     @Volatile private var isPausedLocally = false
     var isMicMuted = false
     private var totalAiFrames = 0
@@ -184,22 +184,22 @@ class AudioEngine(
         autoGainControl = null
     }
 
-    fun playAudioChunk(pcmData: ByteArray) {
+    fun playAudioChunk(pcmData: ByteArray, pcmSampleRate: Int = 22050) {
         // Calculate frames from bytes (16-bit Mono = 2 bytes per frame)
         // We subtract 44 bytes if it's a WAV header so we don't count metadata as audio
         val isWav = pcmData.size >= 44 && pcmData[0] == 'R'.code.toByte() && pcmData[1] == 'I'.code.toByte()
         val audioBytes = if (isWav) pcmData.size - 44 else pcmData.size
         totalAiFrames += audioBytes / 2
         
-        audioQueue.put(pcmData) // Instantly queues and returns, freeing the WebSocket thread!
+        audioQueue.put(Pair(pcmData, pcmSampleRate)) // Instantly queues and returns, freeing the WebSocket thread!
 
         if (playbackThread == null || playbackThread?.isAlive != true) {
             playbackThread = Thread {
                 Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
                 while (!Thread.currentThread().isInterrupted) {
                     try {
-                        val chunk = audioQueue.take() // Blocks efficiently until a chunk is ready
-                        playChunkInternal(chunk)
+                        val chunk = audioQueue.take()
+                        playChunkInternal(chunk.first, chunk.second)
                     } catch (e: InterruptedException) {
                         break
                     }
@@ -243,11 +243,11 @@ class AudioEngine(
         }
     }
 
-    private fun playChunkInternal(pcmData: ByteArray) {
+    private fun playChunkInternal(pcmData: ByteArray, chunkSampleRate: Int) {
         // Check if the data has a standard 44-byte RIFF/WAVE header
         val isWav = pcmData.size >= 44 && pcmData[0] == 'R'.code.toByte() && pcmData[1] == 'I'.code.toByte()
         
-        var trackSampleRate = sampleRate
+        var trackSampleRate = chunkSampleRate
         
         if (isWav) {
             // Extract Sample Rate from WAV header (bytes 24-27, Little Endian)

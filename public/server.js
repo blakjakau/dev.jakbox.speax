@@ -37,6 +37,8 @@ export class ServerClient {
                 this.callbacks.onSummarySync(JSON.parse(rawText.substring(9)));
             } else if (rawText.startsWith("[FULL_EXPORT]")) {
                 this.callbacks.onFullExportSync(JSON.parse(rawText.substring(13)));
+            } else if (rawText.startsWith("[TTS_CHUNK]")) {
+                this.callbacks.onTtsChunk(rawText.substring(11));
             } else if (rawText.trim() === "[AI_START]") {
                 this.isGeneratingAi = true;
                 this.callbacks.onAiStart();

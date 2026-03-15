@@ -124,6 +124,7 @@ const menuSettingsBtn = document.getElementById('menuSettingsBtn');
 const menuLogoutBtn = document.getElementById('menuLogoutBtn');
 
 const threadsFab = document.getElementById('threadsFab');
+if (threadsFab) threadsFab.style.transition = 'bottom 0.2s ease-out';
 const threadsSidebar = document.getElementById('threadsSidebar');
 const closeThreadsBtn = document.getElementById('closeThreadsBtn');
 const newThreadBtn = document.getElementById('newThreadBtn');
@@ -144,6 +145,20 @@ const aiModel = document.getElementById('aiModel');
 const aiVoice = document.getElementById('aiVoice');
 const storageMode = document.getElementById('storageMode');
 const saveSettingsBtn = document.getElementById('saveSettingsBtn');
+
+// Dynamically inject Local TTS UI toggle so we don't need to touch index.html
+const localTtsContainer = document.createElement('div');
+localTtsContainer.style.display = 'flex';
+localTtsContainer.style.alignItems = 'center';
+localTtsContainer.style.margin = '12px 0';
+localTtsContainer.innerHTML = `
+    <span style="flex-grow:1; color:var(--on-surface);">Use Local TTS (Piper)</span>
+    <input type="checkbox" id="useLocalTtsToggle">
+`;
+if (storageMode) storageMode.parentNode.insertBefore(localTtsContainer, storageMode.nextSibling);
+const useLocalTtsToggle = document.getElementById('useLocalTtsToggle');
+let useLocalTts = localStorage.getItem('speax_local_tts') === 'true';
+if (useLocalTtsToggle) useLocalTtsToggle.checked = useLocalTts;
 
 aiProvider.value = localStorage.getItem('speax_provider') || 'ollama';
 geminiApiKey.value = localStorage.getItem('speax_gemini_key') || '';
@@ -247,10 +262,11 @@ if (isNativeSttSupported) {
             status.innerText = `Hearing: ${interimTranscript}`;
         }
         
-        // True Barge-in: Suspend TTS immediately if we hear words
-        const isAiActive = (currentAiDiv !== null || isPlayingAudio);
+        // True Barge-in: Suspend TTS immediately if we hear words (including Web Speech API)
+        const isAiActive = (currentAiDiv !== null || isPlayingAudio || window.speechSynthesis.speaking);
         if ((interimTranscript || finalTranscript) && isAiActive && !isPaused) {
             if (outContext && outContext.state === 'running') outContext.suspend();
+            window.speechSynthesis.cancel(); // Barge-in = stop talking!
         }
 
         if (finalTranscript) {
@@ -327,6 +343,39 @@ function flushNativeSttBuffer() {
     nativeSttBuffer = "";
 }
 
+// --- Local Edge TTS Processing Queue ---
+let localTtsQueue = [];
+let isGeneratingLocalTts = false;
+
+async function processLocalTtsQueue() {
+    if (isGeneratingLocalTts || localTtsQueue.length === 0) return;
+    isGeneratingLocalTts = true;
+    
+    const text = localTtsQueue.shift();
+    console.log("[Local TTS] Synthesizing chunk:", text);
+    
+    try {
+        await new Promise((resolve) => {
+            const utterance = new SpeechSynthesisUtterance(text);
+            
+            // Optional: If you ever select a native browser voice in the dropdown, it will try to use it!
+            const voices = window.speechSynthesis.getVoices();
+            const selectedVoice = voices.find(v => v.name === aiVoice.value);
+            if (selectedVoice) utterance.voice = selectedVoice;
+            
+            utterance.onend = resolve;
+            utterance.onerror = resolve; // Resolve on error so the queue doesn't jam
+            
+            window.speechSynthesis.speak(utterance);
+        });
+    } catch (err) {
+        console.error("Local TTS Error:", err);
+    }
+    
+    isGeneratingLocalTts = false;
+    processLocalTtsQueue(); // Check for next chunk
+}
+
 function closeDrawers() {
     threadsSidebar.style.bottom = '-100%';
     settingsSidebar.style.left = '-320px';
@@ -347,6 +396,11 @@ saveSettingsBtn.onclick = () => {
     localStorage.setItem('speax_voice', aiVoice.value);
     localStorage.setItem('speax_user_name', userName.value);
     localStorage.setItem('speax_user_bio', userBio.value);
+    
+    if (useLocalTtsToggle) {
+        useLocalTts = useLocalTtsToggle.checked;
+        localStorage.setItem('speax_local_tts', useLocalTts);
+    }
     
     const isClient = storageMode.value === 'client';
     const wasClient = memoryManager.isClientSide;
@@ -443,6 +497,9 @@ function switchTab(activeBtn, activeView) {
         activeView.style.display = activeView === homeView ? 'flex' : 'block';
         if (activeView === transcript) {
             textInputContainer.style.display = 'flex';
+                if (threadsFab) threadsFab.style.bottom = '160px'; // Glide up to clear the text input
+            } else {
+                if (threadsFab) threadsFab.style.bottom = '100px'; // Drop back down to default resting position
         }
     }
 }
@@ -510,7 +567,8 @@ function getSettingsObj() {
         apiKey: localStorage.getItem('speax_gemini_key') || '',
         model: localStorage.getItem('speax_model') || '',
         voice: localStorage.getItem('speax_voice') || '',
-        clientStorage: memoryManager.isClientSide
+        clientStorage: memoryManager.isClientSide,
+        clientTts: useLocalTts
     };
 }
 
@@ -619,6 +677,10 @@ serverClient = new ServerClient(
             audioQueue.push(blob);
             if (!isPlayingAudio) playNextAudio();
         },
+        onTtsChunk: (text) => {
+            localTtsQueue.push(text);
+            processLocalTtsQueue();
+        },
         onSettingsSync: (s) => {
             if (s.tokenUsage) {
                 lastTokenUsage = s.tokenUsage;
@@ -637,6 +699,8 @@ serverClient = new ServerClient(
                 userBio.value = s.userBio || '';
                 aiProvider.value = s.provider;
                 storageMode.value = s.clientStorage ? 'client' : 'server';
+                useLocalTts = s.clientTts || false;
+                if (useLocalTtsToggle) useLocalTtsToggle.checked = useLocalTts;
                 geminiSettings.style.display = s.provider === 'gemini' ? 'flex' : 'none';
                 memoryManager.setClientSide(s.clientStorage);
                 
@@ -741,6 +805,7 @@ serverClient = new ServerClient(
         onAiStart: () => {
             aiAudioTotalSecs = 0;
             aiAudioPlayedSecs = 0;
+            localTtsQueue = []; // Clear pending TTS queue
             currentVisualPercent = 0;
             progressBar.style.transition = 'none';
             progressBar.style.width = '0%';
@@ -824,6 +889,7 @@ if (rebuildSummaryBtn) {
 function stopEverything() {
     isDictationActive = false; // Prevent auto-reconnect
     serverClient.disconnect();
+    localTtsQueue = [];
     mainToggleBtn.innerHTML = ICON_POWER;
     mainToggleBtn.className = 'main-toggle-btn disconnected';
     muteBtn.style.display = 'none';
@@ -842,15 +908,18 @@ pauseBtn.onclick = () => {
         pauseBtn.innerHTML = ICON_PLAY;
         pauseBtn.classList.add('pressed');
         if (outContext && outContext.state === 'running') outContext.suspend();
+        window.speechSynthesis.pause(); // Pause native speech
         if (!isMuted) muteBtn.click(); // Mute mic
         if (useNativeStt) stopNativeListening();
         flushNativeSttBuffer(); // Force send any pending thoughts
         if (audioChunks.length > 0) sendAndClearBuffer(); // Flush any pending audio
+        localTtsQueue = []; // Clear pending TTS chunks
         status.innerText = "Status: Paused";
     } else {
         pauseBtn.innerHTML = ICON_PAUSE;
         pauseBtn.classList.remove('pressed');
         if (outContext && outContext.state === 'suspended') outContext.resume();
+        window.speechSynthesis.resume(); // Resume native speech
         if (useNativeStt && !isMuted && isDictationActive) startNativeListening();
         if (isMuted) muteBtn.click(); // Unmute mic
         if (!isPlayingAudio && audioQueue.length > 0) playNextAudio(); // Drain the accumulated buffer
@@ -991,6 +1060,7 @@ function renderVisualizer() {
 
 function stopAudio() {
     audioQueue = []; // Clear the pending playlist
+    window.speechSynthesis.cancel(); // Kill native Web Speech API if it's running
     if (currentAudioSource) {
         currentAudioSource.onended = null; // Prevent race condition injecting time into the next AI generation!
         try { currentAudioSource.stop(); } catch (e) {}

@@ -32,7 +32,7 @@ const (
 	whisperURL    = "http://localhost:8081/inference"
 
 	piperBin      = "./piper/piper"                     // Path to the piper executable
-	defaultVoice  = "en_GB-alba-medium.onnx"            // Default fallback
+	defaultVoice  = "en_GB-alba-tiny.onnx"            // Default fallback
 	sampleRate    = 16000
 	
 	ollamaURL     = "http://localhost:11434/api/generate"
@@ -129,6 +129,7 @@ type ClientSession struct {
 	Voice    string        `json:"voice"`
 	Mutex    sync.Mutex    `json:"-"`
 	ClientStorage bool     `json:"clientStorage"`
+	ClientTts    bool      `json:"clientTts"`
 	ConnMutex sync.Mutex   `json:"-"` // Dedicated lock for WebSocket writes
 	TokenUsage map[string]int64 `json:"tokenUsage"`
 	Conns map[*websocket.Conn]bool `json:"-"`
@@ -296,6 +297,7 @@ func sendSettings(ws *websocket.Conn, session *ClientSession) {
 		"model":    session.Model,
 		"voice":    session.Voice,
 		"clientStorage": session.ClientStorage,
+		"clientTts": session.ClientTts,
 		"tokenUsage": session.TokenUsage,
 	})
 	session.Mutex.Unlock()
@@ -541,6 +543,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					Model    string `json:"model"`
 					Voice    string `json:"voice"`
 					ClientStorage bool `json:"clientStorage"`
+					ClientTts    bool `json:"clientTts"`
 				}
 				if err := json.Unmarshal([]byte(strings.TrimPrefix(text, "[SETTINGS]")), &settings); err == nil {
 					session.Mutex.Lock()
@@ -551,7 +554,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 						session.APIKey != settings.APIKey ||
 						session.Model != settings.Model ||
 						session.Voice != settings.Voice ||
-						session.ClientStorage != settings.ClientStorage
+						session.ClientStorage != settings.ClientStorage ||
+						session.ClientTts != settings.ClientTts
 					if changed {
 						session.UserName = settings.UserName
 						session.UserBio = settings.UserBio
@@ -561,6 +565,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 						session.Voice = settings.Voice
 						session.GoogleName = settings.GoogleName
 						session.ClientStorage = settings.ClientStorage
+						session.ClientTts = settings.ClientTts
 					}
 					session.Mutex.Unlock()
 					if changed {
@@ -670,6 +675,9 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				cleanerText := strings.ToLower(strings.Trim(text, ".,! "))
 				isHallucination := cleanerText == "thank you" || 
 								   cleanerText == "thank you." || 
+								   cleanerText == "thank you.\nthank you." || 
+								   cleanerText == "thank you.\nthank you" || 
+								   cleanerText == "thank you. thank you" || 
 								   cleanerText == "bye" || 
 								   cleanerText == "bye." || 
 								   cleanerText == "goodbye" || 
@@ -888,11 +896,20 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		defer wg.Done()
 		for text := range ttsChan {
 			if ctx.Err() != nil { return }
-			audioBytes, err := queryTTS(text, voice)
-			if err != nil {
-				log.Println("Gemini TTS Worker Error:", err)
-			} else if ctx.Err() == nil {
-				safeWrite(ws, session, websocket.BinaryMessage, audioBytes)
+			
+			session.Mutex.Lock()
+			isClientTts := session.ClientTts
+			session.Mutex.Unlock()
+
+			if isClientTts {
+				safeWrite(ws, session, websocket.TextMessage, []byte("[TTS_CHUNK]"+text))
+			} else {
+				audioBytes, err := queryTTS(text, voice)
+				if err != nil {
+					log.Println("Gemini TTS Worker Error:", err)
+				} else if ctx.Err() == nil {
+					safeWrite(ws, session, websocket.BinaryMessage, audioBytes)
+				}
 			}
 		}
 	}()
@@ -1106,11 +1123,20 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			if ctx.Err() != nil {
 				return // Abort if interrupted
 			}
-			audioBytes, err := queryTTS(text, voice)
-			if err != nil {
-				log.Println("Ollama TTS Worker Error:", err)
-			} else if ctx.Err() == nil {
-				safeWrite(ws, session, websocket.BinaryMessage, audioBytes)
+			
+			session.Mutex.Lock()
+			isClientTts := session.ClientTts
+			session.Mutex.Unlock()
+
+			if isClientTts {
+				safeWrite(ws, session, websocket.TextMessage, []byte("[TTS_CHUNK]"+text))
+			} else {
+				audioBytes, err := queryTTS(text, voice)
+				if err != nil {
+					log.Println("Ollama TTS Worker Error:", err)
+				} else if ctx.Err() == nil {
+					safeWrite(ws, session, websocket.BinaryMessage, audioBytes)
+				}
 			}
 		}
 	}()
