@@ -26,34 +26,44 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 )
 
-const (
-	// whisperURL    = "http://192.168.1.21:8081/inference"
-	whisperURL = "http://localhost:8081/inference"
+type Config struct {
+	WhisperURLs          []string `json:"WhisperURLs"`
+	PiperBin             string   `json:"PiperBin"`
+	DefaultVoice         string   `json:"DefaultVoice"`
+	SampleRate           int      `json:"SampleRate"`
+	OllamaURLs           []string `json:"OllamaURLs"`
+	OllamaChatURL        []string `json:"OllamaChatURL"`
+	OllamaModel          string   `json:"OllamaModel"`
+	WakeWords            []string `json:"WakeWords"`
+	PassiveWindowSeconds int      `json:"PassiveWindowSeconds"`
+	MaxArchiveTurns      int      `json:"MaxArchiveTurns"`
+	MaxTokensGemini      int      `json:"MaxTokensGemini"`
+	MaxTokensOllama      int      `json:"MaxTokensOllama"`
+	SystemPromptGemini   string   `json:"SystemPromptGemini"`
+	SystemPromptOllama   string   `json:"SystemPromptOllama"`
+	ToolSystemPrompt     string   `json:"ToolSystemPrompt"`
+}
 
-	piperBin     = "./piper/piper"        // Path to the piper executable
-	defaultVoice = "en_GB-alba-tiny.onnx" // Default fallback
-	sampleRate   = 16000
+var config Config
 
-	ollamaURL     = "http://localhost:11434/api/generate"
-	ollamaChatURL = "http://localhost:11434/api/chat"
-	// ollamaModel   = "gemma3n:e2b" // Change this if you pulled a different model!
-
-	// ollamaURL     = "http://192.168.1.21:11434/api/generate"
-	// ollamaChatURL = "http://192.168.1.21:11434/api/chat"
-	ollamaModel = "gemma3:1b-it-qat" //""llama3.2:1b" // Change this if you pulled a different model!
-
-	// llama3.2:1b
-	// llama3.2:3b
-	// gemma3:1b-it-qat
-	// gemma3:4b-it-qat
-	// mistral-nemo:12b
-	// gemma3n:e2b
-	// gemma3:270m
+var (
+	whisperIndex    uint32
+	ollamaIndex     uint32
+	ollamaChatIndex uint32
 )
+
+func getNextURL(urls []string, index *uint32) string {
+	if len(urls) == 0 {
+		return ""
+	}
+	newIdx := atomic.AddUint32(index, 1)
+	return urls[int(newIdx-1)%len(urls)]
+}
 
 var (
 	googleClientID     string
@@ -61,6 +71,16 @@ var (
 )
 
 func init() {
+	// Load server.config
+	confData, err := os.ReadFile("server.config")
+	if err != nil {
+		log.Fatal("FATAL: Could not read server.config: ", err)
+	}
+	if err := json.Unmarshal(confData, &config); err != nil {
+		log.Fatal("FATAL: Could not parse server.config: ", err)
+	}
+	log.Println("Loaded server settings from server.config")
+
 	data, err := os.ReadFile("google-client-secret.json")
 	if err == nil {
 		var creds struct {
@@ -172,9 +192,7 @@ func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Ti
 	}
 
 	lowerPrompt := strings.ToLower(prompt)
-	wakeWords := []string{"alex", "alyx", "alix", "alecks"}
-	
-	for _, word := range wakeWords {
+	for _, word := range config.WakeWords {
 		if strings.Contains(lowerPrompt, word) {
 			session.Mutex.Lock()
 			session.LastActiveTime = time.Now()
@@ -185,7 +203,7 @@ func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Ti
 	}
 
 	session.Mutex.Lock()
-	recentlyActive := baseTime.Sub(session.LastActiveTime) < 60*time.Second
+	recentlyActive := baseTime.Sub(session.LastActiveTime) < time.Duration(config.PassiveWindowSeconds)*time.Second
 	if recentlyActive {
 		session.LastActiveTime = time.Now() // Reset the window from the moment of processing
 	}
@@ -404,7 +422,7 @@ func sendSummary(ws *websocket.Conn, session *ClientSession) {
 	payload, err := json.Marshal(map[string]interface{}{
 		"text":            summary,
 		"archiveTurns":    archiveTurns,
-		"maxArchiveTurns": 100, // 200 messages / 2
+		"maxArchiveTurns": config.MaxArchiveTurns, // 100 messages / 2
 		"estTokens":       estTokens,
 		"maxTokens":       maxTokens,
 	})
@@ -919,7 +937,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				v := session.Voice
 				session.Mutex.Unlock()
 				if v == "" {
-					v = defaultVoice
+					v = config.DefaultVoice
 				}
 				audioBytes, err := queryTTS(t, v)
 				if err != nil {
@@ -1021,8 +1039,8 @@ func addWavHeader(pcmData []byte) []byte {
 	binary.Write(buf, binary.LittleEndian, uint32(16))
 	binary.Write(buf, binary.LittleEndian, uint16(1))     // AudioFormat: PCM
 	binary.Write(buf, binary.LittleEndian, uint16(1))     // NumChannels: Mono
-	binary.Write(buf, binary.LittleEndian, uint32(16000)) // SampleRate: 16kHz
-	binary.Write(buf, binary.LittleEndian, uint32(32000)) // ByteRate: SampleRate * NumChannels * BitsPerSample/8
+	binary.Write(buf, binary.LittleEndian, uint32(config.SampleRate)) // SampleRate: e.g. 16kHz
+	binary.Write(buf, binary.LittleEndian, uint32(config.SampleRate*2)) // ByteRate: SampleRate * NumChannels * BitsPerSample/8
 	binary.Write(buf, binary.LittleEndian, uint16(2))     // BlockAlign: NumChannels * BitsPerSample/8
 	binary.Write(buf, binary.LittleEndian, uint16(16))    // BitsPerSample: 16
 	// data chunk
@@ -1048,7 +1066,8 @@ func queryWhisper(audioData []byte) (string, error) {
 	part.Write(wavData)
 	writer.Close()
 
-	resp, err := http.Post(whisperURL, writer.FormDataContentType(), body)
+	url := getNextURL(config.WhisperURLs, &whisperIndex)
+	resp, err := http.Post(url, writer.FormDataContentType(), body)
 	if err != nil {
 		return "", err
 	}
@@ -1089,24 +1108,7 @@ func buildToolSystemPrompt(session *ClientSession) string {
 
 	schemasJSON, _ := json.MarshalIndent(promptData, "", "  ")
 
-	return fmt.Sprintf(`
-You have access to the following external tools. To use a tool, you MUST output a JSON block wrapped EXACTLY in the following custom delimiters on its own line:
-|||TOOL_CALL
-{
-  "toolName": "name_of_the_tool",
-  "actionName": "name_of_the_action",
-  "executionId": "a_unique_random_string_like_req123",
-  "params": { ... }
-}
-|||
-
-Here are the registered tools and their available actions:
-%s
-
-When you output a |||TOOL_CALL||| block, the system will intercept it, execute the tool, and silently inject the [TOOL_RESULT] back into your context history. You can then comment on the result.
-
-IMPORTANT: When you decide to use a tool, please provide a brief, conversational acknowledgement to the user when appropriate (e.g., "Sure, let me check the weather for you...") while you generate the tool call block. This ensures the user is not left in silence while the tool executes.
-`, string(schemasJSON))
+	return fmt.Sprintf(config.ToolSystemPrompt, string(schemasJSON))
 }
 
 func extractVoiceName(filename string) string {
@@ -1151,14 +1153,10 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		model = "gemini-1.5-flash"
 	}
 	if voice == "" {
-		voice = defaultVoice
+		voice = config.DefaultVoice
 	}
 	voiceName := extractVoiceName(voice)
-	sysContent := fmt.Sprintf("You are 'Alyx', a highly capable, voice-based AI programming assistant. "+
-		"\n\n You are currently thinking using Google Gemini: %s"+
-		"\n\nYour output is sent directly to a Text-to-Speech engine. "+
-		"\n\n You are speaking using the voice model: %s  "+
-		"\n\nYou MUST strictly follow these rules: 1. NEVER use emojis. 2. NEVER use markdown formatting like asterisks. 3. Keep responses conversational, concise, and easy to listen to. Avoid long verbose responses unless explicitly requested", model, voiceName)
+	sysContent := fmt.Sprintf(config.SystemPromptGemini, model, voiceName)
 
 	if userName != "" {
 		sysContent += fmt.Sprintf("\n\nThe user's name is: %s.", userName)
@@ -1588,18 +1586,13 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	userBio := session.UserBio
 	voice := session.Voice
 	if model == "" {
-		model = ollamaModel
+		model = config.OllamaModel
 	}
 	if voice == "" {
-		voice = defaultVoice
+		voice = config.DefaultVoice
 	}
 	voiceName := extractVoiceName(voice)
-	sysContent := fmt.Sprintf("You are 'Alyx', a highly capable, voice-based AI programming assistant. "+
-		"You are built on a low-latency architecture: a Vanilla JS + WebAudio frontend, a Go WebSocket backend, Whisper STT for hearing, Ollama for thinking, and Piper TTS for speaking. "+
-		"You are currently thinking using the %s model and speaking using the %s voice model. "+
-		"Your output is sent directly to a Text-to-Speech engine. "+
-		"You MUST strictly follow these rules: 1. NEVER use emojis. 2. NEVER use markdown formatting like asterisks. 3. Keep responses conversational, concise, and easy to listen to. Avoid long verbose responses unless explicitly requested",
-		model, voiceName)
+	sysContent := fmt.Sprintf(config.SystemPromptOllama, model, voiceName)
 
 	if userName != "" {
 		sysContent += fmt.Sprintf("\n\nThe user's name is: %s.", userName)
@@ -1644,7 +1637,8 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	}
 	body, _ := json.Marshal(payload)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", ollamaChatURL, bytes.NewReader(body))
+	url := getNextURL(config.OllamaChatURL, &ollamaChatIndex)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		log.Printf("[Ollama] Failed to create request: %v", err)
 		return err
@@ -1996,11 +1990,12 @@ func generateSummaryAsync(messages []ChatMessage, threadID string, session *Clie
 	localSuccess := false
 
 	// 1. Always attempt local summarization first to save tokens (Fast fail after 10s)
-	localPayload := map[string]interface{}{"model": ollamaModel, "prompt": prompt, "stream": false}
+	localPayload := map[string]interface{}{"model": config.OllamaModel, "prompt": prompt, "stream": false}
 	localBody, _ := json.Marshal(localPayload)
 
 	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Post(ollamaURL, "application/json", bytes.NewReader(localBody))
+	url := getNextURL(config.OllamaURLs, &ollamaIndex)
+	resp, err := client.Post(url, "application/json", bytes.NewReader(localBody))
 	if err != nil {
 		log.Printf("Local Ollama summary failed (Network/Timeout): %v", err)
 	} else {
@@ -2098,7 +2093,7 @@ func queryTTS(text string, voiceFile string) ([]byte, error) {
 	log.Printf("[TTS] Generating audio for text: '%s' with voice: %s", text, voiceFile)
 	modelPath := filepath.Join(".", "piper", voiceFile)
 	// Execute piper binary: -f - tells it to output the WAV file directly to standard output
-	cmd := exec.Command(piperBin, "--model", modelPath, "-f", "-")
+	cmd := exec.Command(config.PiperBin, "--model", modelPath, "-f", "-")
 
 	// Feed our text into Piper's standard input
 	cmd.Stdin = strings.NewReader(text)
