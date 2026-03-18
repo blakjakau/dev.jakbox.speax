@@ -24,6 +24,7 @@ let reconnectDelay = 1000;
 const MAX_RECONNECT_DELAY = 5000;
 let isDictationActive = false;
 let isPaused = false;
+let speechStartTime = 0; // Recorded when VAD trips
 let lastSummaryData = { estTokens: 0, maxTokens: 8192, archiveTurns: 0, maxArchiveTurns: 250, text: "No summary generated yet." };
 let lastTokenUsage = {};
 
@@ -368,7 +369,7 @@ if (isNativeSttSupported) {
 
 function flushNativeSttBuffer() {
     if (nativeSttBuffer && serverClient && serverClient.isOpen()) {
-        serverClient.send(`[TEXT_PROMPT]:${nativeSttBuffer}`);
+        serverClient.send(`[TEXT_PROMPT:${Date.now()}]:${nativeSttBuffer}`);
         stopAudio();
         status.innerText = `Heard: ${nativeSttBuffer}`;
 
@@ -523,7 +524,7 @@ const chatSendBtn = document.getElementById('chatSendBtn');
 function sendTypedMessage() {
     const text = chatTextInput.value.trim();
     if (text && serverClient && serverClient.isOpen()) {
-        serverClient.send(`[TYPED_PROMPT]:${text}`);
+        serverClient.send(`[TYPED_PROMPT:${Date.now()}]:${text}`);
         chatTextInput.value = '';
         stopAudio();
     }
@@ -1307,6 +1308,7 @@ async function startRecording() {
                 }
                 status.innerText = "Status: Recording (Speaking)...";
                 isSpeaking = true;
+                speechStartTime = Date.now();
                 // Prepend the pre-roll buffer to catch the very start of the word
                 audioChunks = [...preRollBuffer];
             }
@@ -1368,7 +1370,13 @@ function sendAndClearBuffer() {
         averageSpeechRms = (0.8 * averageSpeechRms) + (0.2 * chunkRms);
     }
 
-    serverClient.send(pcmData.buffer);
+    // Prepend 8-byte BigEndian timestamp (milliseconds)
+    const finalBuffer = new Uint8Array(8 + pcmData.byteLength);
+    const view = new DataView(finalBuffer.buffer);
+    view.setBigUint64(0, BigInt(speechStartTime));
+    finalBuffer.set(new Uint8Array(pcmData.buffer), 8);
+
+    serverClient.send(finalBuffer.buffer);
     audioChunks = [];
 }
 

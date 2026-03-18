@@ -162,9 +162,13 @@ type ClientSession struct {
 	LastActiveConn    *websocket.Conn              `json:"-"` // Tracks the last client to send input (text/audio)
 }
 
-func shouldProcessPrompt(session *ClientSession, prompt string) bool {
+func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Time) bool {
 	if !session.PassiveAssistant {
 		return true // Always attentive
+	}
+
+	if baseTime.IsZero() {
+		baseTime = time.Now()
 	}
 
 	lowerPrompt := strings.ToLower(prompt)
@@ -175,24 +179,24 @@ func shouldProcessPrompt(session *ClientSession, prompt string) bool {
 			session.Mutex.Lock()
 			session.LastActiveTime = time.Now()
 			session.Mutex.Unlock()
-			log.Printf("[RUMBLE] Wake word detected: '%s'", word)
+			log.Printf("[RUMBLE] Wake word detected at %v: '%s'", baseTime.Format("15:04:05.000"), word)
 			return true
 		}
 	}
 
 	session.Mutex.Lock()
-	recentlyActive := time.Since(session.LastActiveTime) < 60*time.Second
+	recentlyActive := baseTime.Sub(session.LastActiveTime) < 60*time.Second
 	if recentlyActive {
-		session.LastActiveTime = time.Now() // Extend the window
+		session.LastActiveTime = time.Now() // Reset the window from the moment of processing
 	}
 	session.Mutex.Unlock()
 
 	if recentlyActive {
-		log.Printf("[RUMBLE] Processed prompt within 60s active window.")
+		log.Printf("[RUMBLE] Processed prompt within 60s active window (Start: %v).", baseTime.Format("15:04:05.000"))
 		return true
 	}
 
-	log.Printf("[RUMBLE] Ignored prompt in Passive Mode: '%s'", prompt)
+	log.Printf("[RUMBLE] Ignored prompt in Passive Mode (Start: %v): '%s'", baseTime.Format("15:04:05.000"), prompt)
 	return false
 }
 
@@ -819,16 +823,30 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				}
 				
 				if prompt != "" {
-					shouldProcess := isTyped || shouldProcessPrompt(session, prompt)
+					baseTime := time.Now()
+					content := prompt
+					
+					// Support [TEXT_PROMPT:TIMESTAMP]:Content
+					if strings.HasPrefix(prompt, "[") {
+						if closeIdx := strings.Index(prompt, "]:"); closeIdx != -1 {
+							tsStr := strings.Trim(prompt[1:closeIdx], " ")
+							if ts, err := strconv.ParseInt(tsStr, 10, 64); err == nil {
+								baseTime = time.Unix(0, ts*int64(time.Millisecond))
+								content = strings.TrimSpace(prompt[closeIdx+2:])
+							}
+						}
+					}
+
+					shouldProcess := isTyped || shouldProcessPrompt(session, content, baseTime)
 					
 					if shouldProcess {
 						if isTyped {
 							session.Mutex.Lock()
-							session.LastActiveTime = time.Now()
+							session.LastActiveTime = time.Now() // Manual override resets the window
 							session.Mutex.Unlock()
 							log.Printf("[RUMBLE] Manual typed prompt received. Forcing Passive Assistant into Active mode.")
 						}
-						go func(p string) {
+						go func(p string, bt time.Time) {
 							session.Mutex.Lock()
 							if session.ActiveCancel != nil {
 								session.ActiveCancel()
@@ -841,12 +859,12 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 							// Note: Prefixing with [CHAT]: to distinguish from raw transcription echos
 							sendOrBroadcastText(nil, session, []byte("[CHAT]:"+p))
 							
-							log.Printf("[LLM] Processing text prompt: '%s' (isTyped=%v)", p, isTyped)
+							log.Printf("[LLM] Processing text prompt: '%s' (isTyped=%v, Start=%v)", p, isTyped, bt.Format("15:04:05.000"))
 							if err := streamLLMAndTTS(ctx, p, ws, session); err != nil {
 								log.Println("LLM stream error:", err)
 							}
 							log.Println("[LLM] Stream complete (Text Prompt).")
-						}(prompt)
+						}(content, baseTime)
 					}
 				}
 				continue
@@ -920,19 +938,25 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				session.Mutex.Unlock()
 			}
 			// Minimum byte length check (~0.5 seconds of 16-bit PCM is 16000 bytes)
-			if len(p) < 16000 {
-				log.Printf("[STT] Ignored short audio chunk: %d bytes", len(p))
+			// Now with 8-byte timestamp prefix
+			if len(p) < 16008 {
+				log.Printf("[STT] Ignored short audio chunk: %d bytes (min 16008 with timestamp)", len(p))
 				continue
 			}
 
+			// Extract 8-byte Big Endian timestamp (milliseconds since epoch)
+			startTimeMs := int64(binary.BigEndian.Uint64(p[:8]))
+			audioData := p[8:]
+			baseTime := time.Unix(0, startTimeMs*int64(time.Millisecond))
+
 			// Process the complete phrase sent by the client
-			go func(audio []byte) {
+			go func(audio []byte, bt time.Time) {
 				text, err := queryWhisper(audio)
 				if err != nil {
 					log.Println("Whisper error:", err)
 					return
 				}
-				log.Printf("[STT] Whisper Transcribed: '%s'", text)
+				log.Printf("[STT] Whisper Transcribed: '%s' (Start: %v)", text, bt.Format("15:04:05.000"))
 
 				text = strings.TrimSpace(strings.ReplaceAll(text, "[BLANK_AUDIO]", ""))
 
@@ -963,7 +987,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					// Inform client of the filtered non-response, which some clients use
 					// as a signal to resume paused TTS. This does NOT go to the LLM.
 					safeWrite(ws, session, websocket.TextMessage, []byte(clientText))
-				} else if text != "" && shouldProcessPrompt(session, text) {
+				} else if text != "" && shouldProcessPrompt(session, text, bt) {
 					session.Mutex.Lock()
 					if session.ActiveCancel != nil {
 						session.ActiveCancel()
@@ -981,7 +1005,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				} else {
 					safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
 				}
-			}(p)
+			}(audioData, baseTime)
 		}
 	}
 }

@@ -15,7 +15,7 @@ import java.util.concurrent.LinkedBlockingQueue
 import android.os.Process
 
 class AudioEngine(
-    private val onSpeechFinalized: (ByteArray) -> Unit,
+    private val onSpeechFinalized: (ByteArray, Long) -> Unit,
     private val onVolumeChange: (Float) -> Unit = {},
     private val onSpeechStart: () -> Unit = {},
     private val onAiVolumeChange: (Float) -> Unit = {},
@@ -44,6 +44,7 @@ class AudioEngine(
     private var totalAiFrames = 0
     private var totalWrittenFrames = 0
     private val rmsQueue = java.util.concurrent.ConcurrentLinkedQueue<Pair<Int, Float>>()
+    private var speechStartTime = 0L
 
     // VAD Constants
     // 500.0 matches the 0.015 float threshold from the PWA (0.015 * 32768 ≈ 491.5)
@@ -153,7 +154,7 @@ class AudioEngine(
                                     averageSpeechRms = (0.8 * averageSpeechRms) + (0.2 * chunkRms)
                                 }
                                 Log.d("AudioEngine", "Speech finalized due to mute, sending ${byteBuffer.capacity()} bytes")
-                                onSpeechFinalized(byteBuffer.array())
+                                onSpeechFinalized(byteBuffer.array(), speechStartTime)
                             }
                             audioChunks.clear()
                         }
@@ -166,6 +167,7 @@ class AudioEngine(
                         if (!isSpeaking) {
                             Log.d("AudioEngine", "Speech detected! Suspending playback instantly.")
                             isSpeaking = true
+                            speechStartTime = System.currentTimeMillis()
                             suspendPlayback() // Match PWA: Instant pause on interruption
                             onSpeechStart()
                             audioChunks.addAll(preRollBuffer) // Prepend pre-roll
@@ -198,7 +200,7 @@ class AudioEngine(
                                     averageSpeechRms = (0.8 * averageSpeechRms) + (0.2 * chunkRms)
                                 }
                                 Log.d("AudioEngine", "Speech finalized, sending ${byteBuffer.capacity()} bytes")
-                                onSpeechFinalized(byteBuffer.array())
+                                onSpeechFinalized(byteBuffer.array(), speechStartTime)
                             } else {
                                 Log.d("AudioEngine", "Speech discarded (too short)")
                             }

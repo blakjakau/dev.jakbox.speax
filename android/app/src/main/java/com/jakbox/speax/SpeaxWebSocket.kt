@@ -62,9 +62,14 @@ class SpeaxWebSocket(
         }
     }
 
-    fun sendAudio(pcmData: ByteArray) {
+    fun sendAudio(pcmData: ByteArray, startTime: Long) {
         GlobalScope.launch(Dispatchers.IO) {
-            webSocket?.send(pcmData.toByteString())
+            val timestampBytes = java.nio.ByteBuffer.allocate(8)
+                .order(java.nio.ByteOrder.BIG_ENDIAN)
+                .putLong(startTime)
+                .array()
+            val combined = timestampBytes + pcmData
+            webSocket?.send(combined.toByteString())
         }
     }
 

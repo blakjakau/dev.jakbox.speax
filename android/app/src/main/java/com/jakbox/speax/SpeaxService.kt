@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import android.media.session.MediaSession // Added import
 
 class SpeaxService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
@@ -28,12 +29,25 @@ class SpeaxService : Service() {
             return START_NOT_STICKY
         }
 
-        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        // 1. Extract the session token
+        val token = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent?.getParcelableExtra("session_token", MediaSession.Token::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent?.getParcelableExtra<MediaSession.Token>("session_token")
+        }
+
+        // 2. Build notification with MediaStyle
+        val builder = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("Speax is Listening")
             .setContentText("Alyx is running in the background.")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
+
+        if (token != null) {
+            builder.style = Notification.MediaStyle().setMediaSession(token)
+        }
+
+        val notification = builder.build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)

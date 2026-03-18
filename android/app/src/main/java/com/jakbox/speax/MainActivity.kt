@@ -81,6 +81,8 @@ import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 
 data class UiMessage(val role: String, val content: String)
 data class ThreadItem(val id: String, val name: String)
@@ -159,8 +161,8 @@ class MainActivity : ComponentActivity() {
         processedText = wsRe.replace(processedText, " ")
         return processedText.trim()
     }
-
-    private val serverUrl = "wss://speax.jakbox.dev/ws"
+	
+	private val serverUrl = "wss://speax.jakbox.dev/ws"
     private val authUrl = "https://speax.jakbox.dev/auth/login?client=android"
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -195,8 +197,8 @@ class MainActivity : ComponentActivity() {
         }
 
         // 1. Initialize Audio Engine
-        audioEngine = AudioEngine(onSpeechFinalized = { pcmData ->
-            speaxWebSocket?.sendAudio(pcmData)
+        audioEngine = AudioEngine(onSpeechFinalized = { pcmData, startTime ->
+            speaxWebSocket?.sendAudio(pcmData, startTime)
             runOnUiThread { statusText = "Processing with AI..." }
         }, onVolumeChange = { rms ->
             // Pass RMS back to UI thread for Visualizer scaling
@@ -233,8 +235,15 @@ class MainActivity : ComponentActivity() {
 
         setupMediaSession()
         setupSpeechRecognizer()
-
-        // 3. Render UI
+		
+		// Register the local receiver so we can use mute/playpause hardware
+	    val filter = IntentFilter("SPEAX_HARDWARE_BTN")
+	    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+	        registerReceiver(hardwareButtonReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+	    } else {
+	        registerReceiver(hardwareButtonReceiver, filter)
+	    }
+	        // 3. Render UI
         setContent {
             SpeaxTheme {
                 if (sessionCookie == null) {
@@ -257,6 +266,24 @@ class MainActivity : ComponentActivity() {
         isAppInForeground = false
         updateWakeLocks()
     }
+
+	// binding the media play/pause controls
+	private val hardwareButtonReceiver = object : BroadcastReceiver() {
+	    override fun onReceive(context: Context?, intent: Intent?) {
+	        if (intent?.action == "SPEAX_HARDWARE_BTN") {
+	            val keyCode = intent.getIntExtra("keycode", -1)
+	            when (keyCode) {
+	                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+	                KeyEvent.KEYCODE_HEADSETHOOK,
+	                KeyEvent.KEYCODE_MEDIA_PLAY,
+	                KeyEvent.KEYCODE_MEDIA_PAUSE -> toggleAiPause()
+	                
+	                KeyEvent.KEYCODE_MUTE,
+	                KeyEvent.KEYCODE_VOLUME_MUTE -> toggleMicMute()
+	            }
+	        }
+	    }
+	}
 
     /**
      * Centralized wake lock management.
@@ -318,44 +345,74 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateBackgroundService() {
-        val intent = Intent(this, SpeaxService::class.java)
-        if (isConnected && !isMicMuted) {
-            intent.action = "START"
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
-            }
-        } else {
-            intent.action = "STOP"
-            startService(intent)
-        }
-    }
+	    val intent = Intent(this, SpeaxService::class.java)
+	    if (isConnected && !isMicMuted) {
+	        intent.action = "START"
+	        // Pass the token to the background service
+	        mediaSession?.sessionToken?.let { token ->
+	            intent.putExtra("session_token", token)
+	        }
+	        
+	        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+	            startForegroundService(intent)
+	        } else {
+	            startService(intent)
+	        }
+	    } else {
+	        intent.action = "STOP"
+	        startService(intent)
+	    }
+	}
 
     private fun setupMediaSession() {
         mediaSession = MediaSession(this, "SpeaxMediaSession").apply {
+            @Suppress("DEPRECATION")
+            setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
             setCallback(object : MediaSession.Callback() {
                 override fun onPlay() { runOnUiThread { if (isAiPaused) toggleAiPause() } }
                 override fun onPause() { runOnUiThread { if (!isAiPaused) toggleAiPause() } }
                 override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
-                    val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        mediaButtonIntent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
-                    }
-                    if (keyEvent != null && keyEvent.action == KeyEvent.ACTION_DOWN) {
-                        val keyCode = keyEvent.keyCode
-                        if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
-                            keyCode == KeyEvent.KEYCODE_HEADSETHOOK ||
-                            keyCode == KeyEvent.KEYCODE_MEDIA_PLAY ||
-                            keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE) {
-                            runOnUiThread { toggleAiPause() }
-                            return true
-                        }
-                    }
-                    return super.onMediaButtonEvent(mediaButtonIntent)
-                }
+				    val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+				        mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+				    } else {
+				        @Suppress("DEPRECATION")
+				        mediaButtonIntent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+				    }
+				
+				    if (keyEvent != null) {
+				        val keyCode = keyEvent.keyCode
+				        val action = keyEvent.action
+				        
+				        if (action == KeyEvent.ACTION_DOWN) {
+				            // Acknowledge the press so the OS knows we have focus, but do nothing yet
+				            when (keyCode) {
+				                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+				                KeyEvent.KEYCODE_HEADSETHOOK,
+				                KeyEvent.KEYCODE_MEDIA_PLAY,
+				                KeyEvent.KEYCODE_MEDIA_PAUSE,
+				                KeyEvent.KEYCODE_MUTE,
+				                KeyEvent.KEYCODE_VOLUME_MUTE -> return true
+				            }
+				        } else if (action == KeyEvent.ACTION_UP) {
+				            // Execute the toggle when the user releases the button
+				            when (keyCode) {
+				                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+				                KeyEvent.KEYCODE_HEADSETHOOK,
+				                KeyEvent.KEYCODE_MEDIA_PLAY,
+				                KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+				                    runOnUiThread { toggleAiPause() }
+				                    return true
+				                }
+				                KeyEvent.KEYCODE_MUTE,
+				                KeyEvent.KEYCODE_VOLUME_MUTE -> {
+				                    runOnUiThread { toggleMicMute() }
+				                    return true
+				                }
+				            }
+				        }
+				    }
+				    return super.onMediaButtonEvent(mediaButtonIntent)
+				}
             })
             isActive = true
         }
@@ -701,6 +758,7 @@ class MainActivity : ComponentActivity() {
         }
         statusText = "Listening..."
         updateBackgroundService()
+        mediaSession?.isActive = true
         updateMediaSessionState()
         updateWakeLocks()
     }
@@ -843,7 +901,6 @@ class MainActivity : ComponentActivity() {
                 }
                 text == "[AI_START]" -> {
                     runOnUiThread {
-                        audioEngine.abortPlayback() // Ensure a clean slate for Every AI thought
                         isGeneratingAi = true
                         isAiPaused = false // Resync UI: The AI is speaking a new thought
                         messages.add(UiMessage("assistant", ""))
@@ -951,8 +1008,8 @@ class MainActivity : ComponentActivity() {
     fun deleteThread(id: String) { speaxWebSocket?.sendText("[DELETE_THREAD]:$id") }
     fun newThread(name: String) { speaxWebSocket?.sendText("[NEW_THREAD]:$name") }
     fun renameThread(name: String) { speaxWebSocket?.sendText("[RENAME_THREAD]:$name") }
-    fun sendTextPrompt(text: String) { speaxWebSocket?.sendText("[TEXT_PROMPT]:$text") }
-    fun sendTypedPrompt(text: String) { speaxWebSocket?.sendText("[TYPED_PROMPT]:$text") }
+    fun sendTextPrompt(text: String) { speaxWebSocket?.sendText("[TEXT_PROMPT:${System.currentTimeMillis()}]:$text") }
+    fun sendTypedPrompt(text: String) { speaxWebSocket?.sendText("[TYPED_PROMPT:${System.currentTimeMillis()}]:$text") }
     fun deleteMessagePair(index: Int) {
         speaxWebSocket?.sendText("[DELETE_MSG]:$index")
         // Optimistically remove from local UI instantly for a snappy feel
@@ -983,6 +1040,7 @@ class MainActivity : ComponentActivity() {
         isConnected = false
         statusText = "Disconnected"
         updateBackgroundService()
+        mediaSession?.isActive = false
         updateMediaSessionState()
         updateWakeLocks()
 
@@ -1023,6 +1081,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+	    unregisterReceiver(hardwareButtonReceiver)
         audioEngine.stopRecording()
         disconnectWebSocket()
         speechRecognizer?.destroy()
