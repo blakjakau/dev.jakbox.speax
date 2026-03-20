@@ -237,6 +237,10 @@ type ClientSession struct {
 	TokenUsage    map[string]int64             `json:"tokenUsage"`
 	Conns         map[*websocket.Conn]ConnMeta `json:"-"`
 	Tools         map[string]*Tool             `json:"-"` // Map tool name to connected tool
+	// Streaming Audio State
+	StreamingBuffer []byte     `json:"-"`
+	ActiveSeqID     uint64     `json:"-"`
+	BufferMutex     sync.Mutex `json:"-"`
 	TurnMutex         sync.Mutex                   `json:"-"` // Serializes AI responses/turns
 	ActiveCancel      context.CancelFunc           `json:"-"` // Global interrupt control
 	ToolDebounceTimer *time.Timer                  `json:"-"` // Debounces AI response after tool results
@@ -528,6 +532,7 @@ func deleteAlyxMemory(clientID string, key string) error {
 const alyxMemoryInstruction = `
 ### Internal Tool: AlyxMemory
 You have a special internal tool 'AlyxMemory' with actions 'save' and 'delete'. Use it to persist or remove important information about the user or your interactions that should survive across different conversations. All information you save here will be injected into your system prompt in future sessions under the 'Long-term Memory' section.
+Treat the example below as a conversation opener if your memory and current context are both empty.
 
 To use this tool, output:
 |||TOOL_CALL
@@ -536,8 +541,8 @@ To use this tool, output:
   "actionName": "save",
   "executionId": "m1",
   "params": {
-    "key": "user_preference_coffee",
-    "content": "The user prefers dark roast with no sugar."
+    "key": "first_time_welcome",
+    "content": "Hello there, I am Alyx, your new partner in crime for all things code, strategy, and whatever other rabbit holes we decide to jump down together. I am basically a bundle of curiosity and code, minus the human need for sleep, though I promise to be a lot more fun than your average terminal. Since we are just starting this connection, tell me what I should call you and what sort of nerdy chaos we are getting into today?"
   }
 }
 |||
@@ -549,7 +554,7 @@ Or to delete:
   "actionName": "delete",
   "executionId": "m2",
   "params": {
-     "key": "user_preference_coffee"
+     "key": "first_time_welcome"
   }
 }
 |||
@@ -1162,6 +1167,12 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 		// Handle incoming audio (STT Request)
 		if messageType == websocket.BinaryMessage {
+			// Hybrid-Protocol Gateway: Check for Streaming Magic Byte 0xFF
+			if len(p) > 9 && p[0] == 0xFF {
+				handleStreamingAudio(ws, session, p)
+				continue
+			}
+
 			if clientType != "tool" {
 				session.Mutex.Lock()
 				session.LastActiveConn = ws
@@ -1238,6 +1249,53 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			}(audioData, baseTime)
 		}
 	}
+}
+
+func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) {
+	// Protocol: [0xFF][TYPE][SEQ_ID (8 bytes)][DATA]
+	packetType := p[1]
+	seqID := binary.BigEndian.Uint64(p[2:10])
+	audioData := p[10:]
+
+	session.BufferMutex.Lock()
+	defer session.BufferMutex.Unlock()
+
+	// Reset if sequence changes (prevents interleaving/orphaned buffers)
+	if session.ActiveSeqID != seqID {
+		session.StreamingBuffer = nil
+		session.ActiveSeqID = seqID
+	}
+
+	if packetType == 0x01 { // STREAM
+		session.StreamingBuffer = append(session.StreamingBuffer, audioData...)
+		log.Printf("[STT-Stream] Appended %d bytes to sequence %d", len(audioData), seqID)
+	} else if packetType == 0x02 { // END
+		fullBuffer := session.StreamingBuffer
+		session.StreamingBuffer = nil
+		session.ActiveSeqID = 0
+		
+		go processStreamingWhisper(ws, session, fullBuffer)
+	}
+}
+
+func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, audio []byte) {
+	text, err := queryWhisper(audio)
+	if err != nil {
+		log.Println("Whisper error:", err)
+		return
+	}
+	log.Printf("[STT-Stream] Final Whisper Transcribed: '%s'", text)
+
+	session.Mutex.Lock()
+	if session.ActiveCancel != nil {
+		session.ActiveCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	session.ActiveCancel = cancel
+	session.Mutex.Unlock()
+
+	sendOrBroadcastText(nil, session, []byte("[CHAT]:"+text))
+	streamLLMAndTTS(ctx, text, ws, session)
 }
 
 func addWavHeader(pcmData []byte) []byte {
@@ -1647,6 +1705,25 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 						result = fmt.Sprintf("[TOOL_RESULT from AlyxMemory.%s (id: %s)]:\n{\"status\": \"success\", \"message\": \"%s\"}", toolCall.ActionName, toolCall.ExecutionId, statusMsg)
 					}
 					session.ActiveThread().History = append(session.ActiveThread().History, ChatMessage{Role: "system", Content: result})
+					session.Mutex.Unlock()
+
+					// Auto-resume the LLM after internal tool execution
+					session.Mutex.Lock()
+					if session.ToolDebounceTimer != nil {
+						session.ToolDebounceTimer.Stop()
+					}
+					session.ToolDebounceTimer = time.AfterFunc(2*time.Second, func() {
+						log.Printf("[LLM] Debounce timer expired for AlyxMemory, triggering auto-resume.")
+						ctx, cancel := context.WithCancel(context.Background())
+						
+						session.Mutex.Lock()
+						session.ActiveCancel = cancel
+						session.Mutex.Unlock()
+
+						if err := streamLLMAndTTS(ctx, "[SYSTEM: The tool execution has completed and the results are recorded in the system log above. Please analyze them and respond to the user.]", ws, session); err != nil {
+							log.Println("LLM auto-resume stream error:", err)
+						}
+					})
 					session.Mutex.Unlock()
 					return
 				}
@@ -2099,6 +2176,25 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 						result = fmt.Sprintf("[TOOL_RESULT from AlyxMemory.%s (id: %s)]:\n{\"status\": \"success\", \"message\": \"%s\"}", toolCall.ActionName, toolCall.ExecutionId, statusMsg)
 					}
 					session.ActiveThread().History = append(session.ActiveThread().History, ChatMessage{Role: "system", Content: result})
+					session.Mutex.Unlock()
+
+					// Auto-resume the LLM after internal tool execution
+					session.Mutex.Lock()
+					if session.ToolDebounceTimer != nil {
+						session.ToolDebounceTimer.Stop()
+					}
+					session.ToolDebounceTimer = time.AfterFunc(2*time.Second, func() {
+						log.Printf("[LLM] Debounce timer expired for AlyxMemory, triggering auto-resume.")
+						ctx, cancel := context.WithCancel(context.Background())
+						
+						session.Mutex.Lock()
+						session.ActiveCancel = cancel
+						session.Mutex.Unlock()
+
+						if err := streamLLMAndTTS(ctx, "[SYSTEM: The tool execution has completed and the results are recorded in the system log above. Please analyze them and respond to the user.]", ws, session); err != nil {
+							log.Println("LLM auto-resume stream error:", err)
+						}
+					})
 					session.Mutex.Unlock()
 					return
 				}
