@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Speax Search Tool</title>
+    <style>
+        :root {
+            --primary: #bb86fc;
+            --secondary: #03dac6;
+            --background: #121212;
+            --surface: #1e1e1e;
+            --surface-variant: #2d2d2d;
+            --on-surface: #ffffff;
+            --on-surface-medium: #b3b3b3;
+            --error: #cf6679;
+            --outline: #333;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            background-color: var(--background);
+            color: var(--on-surface);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .header {
+            padding: 15px 20px;
+            background-color: var(--surface);
+            border-bottom: 1px solid var(--outline);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.2rem;
+            color: var(--primary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.85rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--error);
+        }
+
+        .status-dot.online {
+            background-color: var(--secondary);
+            box-shadow: 0 0 8px var(--secondary);
+        }
+
+        .main-container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        /* 2-Panel Layout */
+        .history-panel {
+            width: 280px;
+            background-color: var(--surface);
+            border-right: 1px solid var(--outline);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+
+        .results-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background-color: var(--background);
+            overflow-y: auto;
+        }
+
+        .panel-header {
+            padding: 12px 15px;
+            font-size: 0.9rem;
+            font-weight: bold;
+            color: var(--secondary);
+            border-bottom: 1px solid var(--outline);
+            background: rgba(255, 255, 255, 0.05);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .history-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .history-item {
+            padding: 12px 15px;
+            border-bottom: 1px solid var(--outline);
+            cursor: pointer;
+            transition: background 0.2s;
+            position: relative;
+        }
+
+        .history-item:hover {
+            background: var(--surface-variant);
+        }
+
+        .history-item.active {
+            background: rgba(187, 134, 252, 0.1);
+            border-left: 3px solid var(--primary);
+        }
+
+        .history-query {
+            font-size: 0.9rem;
+            font-weight: 500;
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            padding-right: 25px;
+        }
+
+        .delete-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: transparent;
+            border: none;
+            color: var(--on-surface-medium);
+            cursor: pointer;
+            padding: 4px;
+            border-radius: 4px;
+            opacity: 0;
+            transition: opacity 0.2s, color 0.2s, background 0.2s;
+        }
+
+        .history-item:hover .delete-btn {
+            opacity: 1;
+        }
+
+        .delete-btn:hover {
+            color: var(--error);
+            background: rgba(207, 102, 121, 0.1);
+        }
+
+        .history-meta {
+            font-size: 0.75rem;
+            color: var(--on-surface-medium);
+        }
+
+        .results-list {
+            padding: 20px;
+            max-width: 800px;
+            margin: 0 auto;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        .search-result {
+            margin-bottom: 25px;
+            padding: 15px;
+            background: var(--surface);
+            border-radius: 8px;
+            border: 1px solid var(--outline);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .search-result:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            border-color: var(--primary);
+        }
+
+        .result-title {
+            font-size: 1.1rem;
+            margin: 0 0 8px 0;
+            color: var(--primary);
+        }
+
+        .result-title a {
+            color: inherit;
+            text-decoration: none;
+        }
+
+        .result-title a:hover {
+            text-decoration: underline;
+        }
+
+        .result-url {
+            font-size: 0.8rem;
+            color: var(--secondary);
+            margin-bottom: 8px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .result-snippet {
+            font-size: 0.9rem;
+            color: var(--on-surface-medium);
+            line-height: 1.5;
+        }
+
+        .result-source {
+            display: inline-block;
+            margin-top: 10px;
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: var(--surface-variant);
+            color: var(--on-surface-medium);
+        }
+
+        .logging-panel {
+            height: 120px;
+            background: #000;
+            border-top: 1px solid var(--outline);
+            padding: 10px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.8rem;
+            color: #0f0;
+            overflow-y: auto;
+            flex-shrink: 0;
+        }
+
+        .log-entry {
+            margin-bottom: 4px;
+            padding-left: 20px;
+            position: relative;
+        }
+
+        .log-entry::before {
+            content: '>';
+            position: absolute;
+            left: 5px;
+            color: var(--on-surface-medium);
+        }
+
+        .log-time { color: #888; margin-right: 8px; }
+        .log-req { color: var(--secondary); }
+        .log-res { color: var(--primary); }
+        .log-info { color: #fff; }
+
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--on-surface-medium);
+            text-align: center;
+            padding: 20px;
+        }
+
+        .empty-state svg {
+            width: 64px;
+            height: 64px;
+            margin-bottom: 15px;
+            opacity: 0.3;
+        }
+
+        /* Manual Input for testing */
+        .manual-search {
+            padding: 10px 15px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--outline);
+            display: flex;
+            gap: 10px;
+        align-items: center;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            background: var(--surface-variant);
+            border: 1px solid var(--outline);
+            color: #fff;
+            padding: 8px 12px;
+            border-radius: 4px;
+            outline: none;
+        }
+
+        input[type="text"]:focus {
+            border-color: var(--primary);
+        }
+
+        button.primary {
+            background: var(--primary);
+            color: #000;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        button.primary:hover {
+            opacity: 0.8;
+        }
+
+        /* Settings Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 2000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal {
+            background: var(--surface);
+            padding: 30px;
+            border-radius: 12px;
+            border: 1px solid var(--outline);
+            width: 400px;
+            max-width: 90%;
+        }
+
+        .modal h2 {
+            margin-top: 0;
+            color: var(--primary);
+            font-size: 1.2rem;
+        }
+
+        .modal-field {
+            margin-bottom: 20px;
+        }
+
+        .modal-field label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 0.9rem;
+            color: var(--on-surface-medium);
+        }
+
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        button.text-btn {
+            background: transparent;
+            color: var(--on-surface-medium);
+            border: none;
+            cursor: pointer;
+            padding: 8px 16px;
+        }
+
+        button.text-btn:hover {
+            color: #fff;
+        }
+
+        .settings-btn {
+            background: transparent;
+            border: none;
+            color: var(--on-surface-medium);
+            cursor: pointer;
+            padding: 5px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: color 0.2s;
+        }
+
+        .settings-btn:hover {
+            color: var(--primary);
+        }
+    </style>
+</head>
+<body>
+    <div id="login-section" style="display: none; position: fixed; inset: 0; background: var(--background); z-index: 1000; flex-direction: column; align-items: center; justify-content: center;">
+        <h1>Auth Required</h1>
+        <p style="color: var(--on-surface-medium); margin-bottom: 20px;">Please login to continue using Speax Tools.</p>
+        <button class="primary" id="login-btn" style="padding: 12px 24px;">Login with Google</button>
+    </div>
+
+    <div class="header">
+        <h1>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            Speax Search Tool
+        </h1>
+        <div class="status-container">
+            <div id="status-dot" class="status-dot"></div>
+            <span id="status-text">Disconnected</span>
+            <button id="settings-open-btn" class="settings-btn" title="Settings">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            </button>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal-overlay">
+        <div class="modal">
+            <h2>Search Tool Settings</h2>
+            <div class="modal-field">
+                <label for="brave-key-input">Brave Search API Key</label>
+                <input type="text" id="brave-key-input" placeholder="Enter your X-Subscription-Token...">
+                <p style="font-size: 0.7rem; color: var(--on-surface-medium); margin-top: 5px;">This key is stored only in your browser's local storage.</p>
+            </div>
+            <div class="modal-field">
+                <label for="tavily-key-input">Tavily API Key</label>
+                <input type="text" id="tavily-key-input" placeholder="Enter your Tavily API Key...">
+                <p style="font-size: 0.7rem; color: var(--on-surface-medium); margin-top: 5px;">Stored siloed in local storage.</p>
+            </div>
+            <div class="modal-field">
+                <p style="font-size: 0.9rem; color: var(--on-surface-medium);">
+                    <strong>History Retention:</strong> Staggered (6@48h, 6@24h, 6@12h).
+                </p>
+                <p style="font-size: 0.7rem; color: var(--on-surface-medium); margin-top: 5px;">
+                    This policy ensures your most recent work stays longer while cleaning up quickly.
+                </p>
+            </div>
+            <div class="modal-actions">
+                <button id="settings-cancel-btn" class="text-btn">Cancel</button>
+                <button id="settings-save-btn" class="primary">Save Settings</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="manual-search">
+        <select id="provider-select" style="background: var(--surface-variant); color: #fff; padding: 8px; border-radius: 4px;">
+            <option value="all">All Providers</option>
+            <option value="ddg">DuckDuckGo</option>
+            <option value="brave">Brave</option>
+            <option value="searxng">SearXNG</option>
+            <option value="tavily">Tavily</option>
+        </select>
+        <input type="text" id="manual-query" placeholder="Enter query for manual search...">
+        <button id="manual-search-btn" class="primary">Search</button>
+    </div>
+
+    <div class="main-container">
+        <div class="history-panel">
+            <div class="panel-header">Search History</div>
+            <div id="history-list" class="history-list">
+                <!-- History items will be injected here -->
+            </div>
+        </div>
+        <div class="results-panel">
+            <div class="panel-header">
+                Results <span id="results-count" style="font-size: 0.8rem; color: var(--on-surface-medium); font-weight: normal;"></span>
+            </div>
+            <div id="results-list" class="results-list">
+                <div class="empty-state">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                    <p>No results yet. Start a search or wait for Alyx to trigger one.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="logs" class="logging-panel"></div>
+
+    <script type="module">
+        import { SpeaxToolClient } from '/speax-tool-client.mjs';
+        import { DuckDuckGoProvider, SearXNGProvider, BraveSearchProvider,TavilySearchProvider, MultiProvider } from './search-provider.mjs?1';
+
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const logsContainer = document.getElementById('logs');
+        const historyList = document.getElementById('history-list');
+        const resultsList = document.getElementById('results-list');
+        const resultsCountHeader = document.getElementById('results-count');
+        const manualInput = document.getElementById('manual-query');
+        const manualBtn = document.getElementById('manual-search-btn');
+
+        const settingsModal = document.getElementById('settings-modal');
+        const settingsOpenBtn = document.getElementById('settings-open-btn');
+        const settingsCancelBtn = document.getElementById('settings-cancel-btn');
+        const settingsSaveBtn = document.getElementById('settings-save-btn');
+        const braveKeyInput = document.getElementById('brave-key-input');
+        const tavilyKeyInput = document.getElementById('tavily-key-input');
+        const historyExpiryInput = document.getElementById('history-expiry-input');
+
+        let searchHistory = JSON.parse(localStorage.getItem('speax_search_history') || '[]');
+        let currentResults = [];
+        let activeProvider = null;
+        let providers = {};
+
+        async function initProviders() {
+            try {
+                // Client-side siloed approach: Retrieve key from localStorage
+                const braveApiKey = localStorage.getItem('brave_api_key');
+                const tavilyApiKey = localStorage.getItem('tavily_api_key');
+
+                cleanupExpiredHistory();
+                
+                providers.ddg = new DuckDuckGoProvider();
+                providers.searxng = new MultiProvider([
+                    new SearXNGProvider("https://searx.be"),
+                    new SearXNGProvider("https://searxng.org")
+                ]);
+                
+                if (braveApiKey) {
+                    providers.brave = new BraveSearchProvider(braveApiKey);
+                    log("Brave Search Provider initialized.", "info");
+                } else {
+                    log("Brave key missing.", "info");
+                    providers.brave = null;
+                }
+
+                if (tavilyApiKey) {
+                    providers.tavily = new TavilySearchProvider(tavilyApiKey);
+                    log("Tavily Search Provider initialized.", "info");
+                } else {
+                    log("Tavily key missing.", "info");
+                    providers.tavily = null;
+                }
+
+                providers.all = new MultiProvider([
+                    providers.tavily,
+                    providers.brave,
+                    providers.searxng,
+                    providers.ddg
+                ].filter(Boolean));
+
+                // Maintain current selection if possible, otherwise default to "all"
+                const currentSelection = document.getElementById('provider-select').value;
+                if (providers[currentSelection]) {
+                    activeProvider = providers[currentSelection];
+                } else {
+                    activeProvider = providers.all;
+                }
+                
+                log("Search providers initialized.");
+            } catch (err) {
+                log(`Failed to init providers: ${err.message}`, 'error');
+                providers.ddg = new DuckDuckGoProvider();
+                activeProvider = providers.ddg;
+            }
+        }
+
+        // Settings Handlers
+        settingsOpenBtn.onclick = () => {
+            braveKeyInput.value = localStorage.getItem('brave_api_key') || '';
+            tavilyKeyInput.value = localStorage.getItem('tavily_api_key') || '';
+            settingsModal.style.display = 'flex';
+        };
+
+        settingsCancelBtn.onclick = () => {
+            settingsModal.style.display = 'none';
+        };
+
+        settingsSaveBtn.onclick = () => {
+            const newBraveKey = braveKeyInput.value.trim();
+            const newTavilyKey = tavilyKeyInput.value.trim();
+            
+            localStorage.setItem('brave_api_key', newBraveKey);
+            localStorage.setItem('tavily_api_key', newTavilyKey);
+            
+            settingsModal.style.display = 'none';
+            log("Settings saved. Re-initializing providers...");
+            initProviders();
+        };
+
+        // Close modal on outside click
+        window.onclick = (event) => {
+            if (event.target == settingsModal) {
+                settingsModal.style.display = 'none';
+            }
+        };
+
+        const providerSelect = document.getElementById('provider-select');
+        providerSelect.onchange = () => {
+            const val = providerSelect.value;
+            if (providers[val]) {
+                activeProvider = providers[val];
+                log(`Switched to provider: ${val}`);
+            } else if (val === 'searxng') {
+                activeProvider = providers.searxng;
+                log(`Switched to provider: SearXNG`);
+            }
+        };
+
+        function cleanupExpiredHistory() {
+            const now = Date.now();
+            const originalLength = searchHistory.length;
+            
+            searchHistory = searchHistory.filter((item, i) => {
+                // Staggered policy:
+                // 1-6 (index 0-5): 48 hours
+                // 7-12 (index 6-11): 24 hours
+                // 13-18 (index 12-17): 12 hours
+                // 18+ : Expire immediately
+                
+                let expiryMs;
+                if (i < 6) {
+                    expiryMs = 48 * 60 * 60 * 1000;
+                } else if (i < 12) {
+                    expiryMs = 24 * 60 * 60 * 1000;
+                } else if (i < 18) {
+                    expiryMs = 12 * 60 * 60 * 1000;
+                } else {
+                    return false; // Beyond 18 items, drop immediately
+                }
+                
+                const itemTime = typeof item.timestamp === 'number' ? item.timestamp : new Date(item.timestamp).getTime();
+                return (now - itemTime) < expiryMs;
+            });
+            
+            if (searchHistory.length !== originalLength) {
+                log(`Auto-cleaned ${originalLength - searchHistory.length} expired history items based on staggered policy.`);
+                localStorage.setItem('speax_search_history', JSON.stringify(searchHistory));
+                updateHistoryUI();
+            }
+        }
+
+        // Run cleanup every minute
+        setInterval(cleanupExpiredHistory, 60000);
+
+        function log(msg, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            entry.innerHTML = `<span class="log-time">${time}</span> ${msg}`;
+            logsContainer.appendChild(entry);
+            logsContainer.scrollTop = logsContainer.scrollHeight;
+        }
+
+        function updateHistoryUI() {
+            historyList.innerHTML = '';
+            searchHistory.forEach((item, index) => {
+                const div = document.createElement('div');
+                div.className = 'history-item';
+                div.onclick = () => showResults(index);
+                const timeStr = typeof item.timestamp === 'number' ? new Date(item.timestamp).toLocaleString() : item.timestamp;
+                div.innerHTML = `
+                    <div class="history-query">${item.query}</div>
+                    <div class="history-meta">${timeStr} • ${item.results.length} results</div>
+                    <button class="delete-btn" title="Delete search">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                    </button>
+                `;
+                
+                const delBtn = div.querySelector('.delete-btn');
+                delBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    deleteHistoryItem(index);
+                };
+                
+                historyList.appendChild(div);
+            });
+        }
+
+        function deleteHistoryItem(index) {
+            searchHistory.splice(index, 1);
+            localStorage.setItem('speax_search_history', JSON.stringify(searchHistory));
+            updateHistoryUI();
+            resultsList.innerHTML = `
+                <div class="empty-state">
+                    <p>Search deleted.</p>
+                </div>
+            `;
+            resultsCountHeader.textContent = '';
+        }
+
+        function showResults(index) {
+            const item = searchHistory[index];
+            if (!item) return;
+
+            // Mark active history item
+            Array.from(historyList.children).forEach((child, idx) => {
+                child.classList.toggle('active', idx === index);
+            });
+
+            resultsCountHeader.textContent = `(${item.results.length})`;
+            resultsList.innerHTML = '';
+
+            if (item.results.length === 0) {
+                resultsList.innerHTML = `
+                    <div class="empty-state">
+                        <p>No results found for "${item.query}"</p>
+                    </div>
+                `;
+                return;
+            }
+
+            item.results.forEach(res => {
+                const resultDiv = document.createElement('div');
+                resultDiv.className = 'search-result';
+                resultDiv.innerHTML = `
+                    <h3 class="result-title"><a href="${res.url}" target="_blank">${res.title}</a></h3>
+                    <div class="result-url">${res.url}</div>
+                    <div class="result-snippet">${res.snippet}</div>
+                    <div class="result-source">${res.source}</div>
+                `;
+                resultsList.appendChild(resultDiv);
+            });
+        }
+
+        async function performSearch(query) {
+            log(`Searching for: "${query}" using ${activeProvider.name}...`, 'req');
+            try {
+                const results = await activeProvider.search(query);
+                log(`Found ${results.length} results.`, 'res');
+
+                // Idempotency: Stack duplicates by removing any existing entry for this query
+                const existingIndex = searchHistory.findIndex(h => h.query.toLowerCase() === query.toLowerCase());
+                if (existingIndex !== -1) {
+                    searchHistory.splice(existingIndex, 1);
+                }
+
+                const historyItem = {
+                    query,
+                    timestamp: Date.now(),
+                    results: results
+                };
+
+                searchHistory.unshift(historyItem);
+                if (searchHistory.length > 20) cleanupExpiredHistory(); // Trigger cleanup early if exceeding limit
+                localStorage.setItem('speax_search_history', JSON.stringify(searchHistory));
+
+                updateHistoryUI();
+                showResults(0);
+
+                return results;
+            } catch (err) {
+                log(`Search error: ${err.message}`, 'error');
+                throw err;
+            }
+        }
+
+        // --- Manual Search Handler ---
+        manualBtn.onclick = () => {
+            const query = manualInput.value.trim();
+            if (query) {
+                performSearch(query);
+                manualInput.value = '';
+            }
+        };
+        manualInput.onkeypress = (e) => { if (e.key === 'Enter') manualBtn.onclick(); };
+
+        // --- Auth & Tool Client Integration ---
+        function checkAuth() {
+            return document.cookie.includes('speax_session=');
+        }
+
+        if (!checkAuth()) {
+            document.getElementById('login-section').style.display = 'flex';
+            document.getElementById('login-btn').onclick = () => window.location.href = '/auth/login?client=tool';
+        } else {
+            const serverUrl = window.location.origin;
+            const client = new SpeaxToolClient(serverUrl, 'SearchTool');
+
+            client.onConnect = () => {
+                statusDot.className = 'status-dot online';
+                statusText.textContent = 'Connected & Registered';
+                log('Speax connection established.');
+            };
+
+            client.onDisconnect = () => {
+                statusDot.className = 'status-dot';
+                statusText.textContent = 'Disconnected';
+                log('Speax connection lost.', 'error');
+            };
+
+            // Register Search Action for AI
+            client.registerAction(
+                'web_search',
+                'Performs a web search to provide up-to-date information.',
+                () => ({
+                    type: 'object',
+                    properties: {
+                        query: { type: 'string', description: 'The search query to perform.' }
+                    },
+                    required: ['query']
+                }),
+                async (params) => {
+                    log(`AI triggered search: "${params.query}"`, 'req');
+                    const results = await performSearch(params.query);
+                    return { 
+                        results: results.map(r => ({
+                            title: r.title,
+                            snippet: r.snippet,
+                            url: r.url
+                        }))
+                    };
+                }
+            );
+
+            log('Initializing ToolClient...');
+            initProviders().then(() => {
+                client.connect();
+                updateHistoryUI();
+            });
+        }
+    </script>
+</body>
+</html>
