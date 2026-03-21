@@ -37,11 +37,18 @@ class SpeaxService : Service() {
             intent?.getParcelableExtra<MediaSession.Token>("session_token")
         }
 
+        val isMuted = intent?.getBooleanExtra("is_muted", false) ?: false
+
         // 2. Build notification with MediaStyle
+        val title = if (isMuted) "Speax is Muted" else "Speax is Listening"
+        val text = if (isMuted) "Tap to unmute or resume Alyx." else "Alyx is running in the background."
+        val icon = if (isMuted) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_btn_speak_now
+
         val builder = Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("Speax is Listening")
-            .setContentText("Alyx is running in the background.")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setSmallIcon(icon)
+            .setOngoing(true)
 
         if (token != null) {
             builder.style = Notification.MediaStyle().setMediaSession(token)

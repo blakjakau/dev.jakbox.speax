@@ -348,12 +348,14 @@ class MainActivity : ComponentActivity() {
 
     private fun updateBackgroundService() {
 	    val intent = Intent(this, SpeaxService::class.java)
-	    if (isConnected && !isMicMuted) {
+	    if (isConnected) {
 	        intent.action = "START"
 	        // Pass the token to the background service
 	        mediaSession?.sessionToken?.let { token ->
 	            intent.putExtra("session_token", token)
 	        }
+	        // Pass the current mute/pause state to the notification
+	        intent.putExtra("is_muted", isMicMuted || isAiPaused)
 	        
 	        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
 	            startForegroundService(intent)
@@ -370,6 +372,15 @@ class MainActivity : ComponentActivity() {
         mediaSession = MediaSession(this, "SpeaxMediaSession").apply {
             @Suppress("DEPRECATION")
             setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
+            
+            // Tell the OS we are in a Voice Communication (Call) session!
+            // This is required for many headsets to route buttons correctly when the mic is open.
+            val callAttributes = android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            setPlaybackToLocal(callAttributes)
+
             setCallback(object : MediaSession.Callback() {
                 override fun onPlay() { runOnUiThread { if (isAiPaused) toggleAiPause() } }
                 override fun onPause() { runOnUiThread { if (!isAiPaused) toggleAiPause() } }
@@ -423,9 +434,13 @@ class MainActivity : ComponentActivity() {
 
     private fun updateMediaSessionState() {
         val state = if (isAiPaused || !isConnected) PlaybackState.STATE_PAUSED else PlaybackState.STATE_PLAYING
+        
+        // Provide a simulated moving position when playing to help the OS recognize activity
+        val position = if (state == PlaybackState.STATE_PLAYING) System.currentTimeMillis() else PlaybackState.PLAYBACK_POSITION_UNKNOWN
+        
         val playbackState = PlaybackState.Builder()
             .setActions(PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or PlaybackState.ACTION_PLAY_PAUSE)
-            .setState(state, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+            .setState(state, position, 1.0f)
             .build()
         mediaSession?.setPlaybackState(playbackState)
     }
@@ -992,16 +1007,19 @@ class MainActivity : ComponentActivity() {
     fun toggleAiPause() {
         isAiPaused = !isAiPaused
         if (isAiPaused) {
+            speaxWebSocket?.sendText("[PAUSE]")
             audioEngine.suspendPlayback()
             isMicMuted = true
             audioEngine.isMicMuted = true
             audioEngine.forceEndStreaming()
             if (useNativeStt) stopNativeListening()
         } else {
+            speaxWebSocket?.sendText("[RESUME]")
             audioEngine.resumePlayback()
             isMicMuted = false
             audioEngine.isMicMuted = false
             if (useNativeStt) restartNativeListening()
+            else audioEngine.startRecording()
         }
         updateBackgroundService()
         updateMediaSessionState()

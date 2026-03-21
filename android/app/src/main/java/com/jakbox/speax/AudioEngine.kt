@@ -68,7 +68,7 @@ class AudioEngine(
     fun startRecording() {
         if (recordingThread != null) return
 
-        val audioSource = if (micProfile == "sensitive" || micProfile == "standard") MediaRecorder.AudioSource.VOICE_RECOGNITION else MediaRecorder.AudioSource.VOICE_COMMUNICATION
+        val audioSource = if (micProfile == "sensitive") MediaRecorder.AudioSource.VOICE_RECOGNITION else MediaRecorder.AudioSource.VOICE_COMMUNICATION
 
         audioRecord = AudioRecord(
             audioSource,
