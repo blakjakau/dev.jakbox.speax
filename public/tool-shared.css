@@ -1,0 +1,287 @@
+:root {
+    --primary: #bb86fc;
+    --secondary: #03dac6;
+    --background: #121212;
+    --surface: #1e1e1e;
+    --surface-variant: #2d2d2d;
+    --on-surface: #ffffff;
+    --on-surface-medium: #b3b3b3;
+    --error: #cf6679;
+    --outline: #333;
+    --glass: rgba(255, 255, 255, 0.05);
+    --glass-border: rgba(255, 255, 255, 0.1);
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+    margin: 0;
+    background-color: var(--background);
+    color: var(--on-surface);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar Styles */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+::-webkit-scrollbar-track {
+    background: var(--background);
+}
+::-webkit-scrollbar-thumb {
+    background: var(--surface-variant);
+    border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--outline);
+}
+
+/* Typography */
+h1, h2, h3, h4 {
+    margin: 0;
+    font-weight: 600;
+}
+
+/* Common Layout Elements */
+.header {
+    padding: 1rem 1.5rem;
+    background: var(--surface);
+    border-bottom: 1px solid var(--outline);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+.header h1 {
+    font-size: 1.25rem;
+    color: var(--primary);
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.container {
+    padding: 1.5rem;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+/* Cards */
+.card {
+    background: var(--surface);
+    border-radius: 12px;
+    padding: 1.5rem;
+    border: 1px solid var(--outline);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.card h2 {
+    font-size: 1.1rem;
+    color: var(--secondary);
+    margin-bottom: 1rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--outline);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+/* Buttons */
+button {
+    font-family: inherit;
+    font-size: 0.9rem;
+    font-weight: 500;
+    padding: 0.6rem 1.2rem;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    border: none;
+    outline: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+}
+
+button.primary {
+    background: var(--primary);
+    color: #000;
+}
+button.primary:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(187, 134, 252, 0.3);
+}
+
+button.secondary {
+    background: var(--surface-variant);
+    color: var(--on-surface);
+}
+button.secondary:hover {
+    background: var(--outline);
+}
+
+button.btn-icon {
+    padding: 0.5rem;
+    background: transparent;
+    color: var(--on-surface-medium);
+}
+button.btn-icon:hover {
+    color: var(--primary);
+    background: var(--glass);
+}
+button.btn-icon.delete:hover {
+    color: var(--error);
+    background: rgba(207, 102, 121, 0.1);
+}
+
+/* Forms */
+.input-group {
+    display: flex;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+input[type="text"], input[type="password"], textarea, select {
+    background: var(--surface-variant);
+    border: 1px solid var(--outline);
+    color: var(--on-surface);
+    padding: 0.6rem 0.9rem;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 0.9rem;
+    outline: none;
+    transition: border-color 0.2s;
+    width: 100%;
+}
+
+input:focus, textarea:focus, select:focus {
+    border-color: var(--primary);
+}
+
+/* Lists and Items */
+.list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    overflow-y: auto;
+}
+
+.item {
+    background: var(--surface-variant);
+    border-radius: 10px;
+    padding: 1rem;
+    border-left: 4px solid var(--primary);
+    position: relative;
+    transition: transform 0.2s, background 0.2s;
+}
+
+.item:hover {
+    background: #333;
+    transform: translateX(4px);
+}
+
+/* Log Panel */
+.logs {
+    background: #000;
+    color: #00ff00;
+    font-family: 'Fira Code', 'Monaco', 'Consolas', monospace;
+    font-size: 0.8rem;
+    padding: 1rem;
+    border-radius: 8px;
+    border: 1px solid var(--outline);
+    overflow-y: auto;
+    max-height: 200px;
+}
+
+.log-entry {
+    margin-bottom: 0.25rem;
+    border-bottom: 1px solid rgba(0, 255, 0, 0.05);
+    padding-bottom: 0.25rem;
+}
+
+.log-time {
+    color: #888;
+    margin-right: 0.75rem;
+}
+
+/* Status Indicators */
+.status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--on-surface-medium);
+}
+
+.dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--error);
+}
+
+.dot.online {
+    background: var(--secondary);
+    box-shadow: 0 0 10px var(--secondary);
+}
+
+/* Badges */
+.badge {
+    background: var(--surface-variant);
+    color: var(--primary);
+    padding: 0.2rem 0.6rem;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+/* Utility */
+.hidden { display: none !important; }
+
+/* Tool Specific Layouts (simplified) */
+.tool-content {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+}
+
+.tool-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.tool-main {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    padding: 1.5rem;
+    gap: 1.5rem;
+}
+
+/* Log Panel (Standardized for bottom placement) */
+.logs {
+    background: #000;
+    color: #00ff00;
+    font-family: 'Fira Code', 'Monaco', 'Consolas', monospace;
+    font-size: 0.8rem;
+    padding: 0.75rem 1rem;
+    border-top: 1px solid var(--outline);
+    overflow-y: auto;
+    height: 150px;
+    flex-shrink: 0;
+}

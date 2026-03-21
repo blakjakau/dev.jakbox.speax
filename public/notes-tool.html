@@ -1,334 +1,87 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Speax Notes & Todo Tool</title>
+    <title>Speax Notes</title>
+    <link rel="stylesheet" href="/tool-shared.css">
     <style>
-        :root {
-            --primary: #bb86fc;
-            --secondary: #03dac6;
-            --background: #121212;
-            --surface: #1e1e1e;
-            --surface-variant: #2d2d2d;
-            --on-surface: #ffffff;
-            --on-surface-medium: #b3b3b3;
-            --error: #cf6679;
-        }
-
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            margin: 0;
-            background-color: var(--background);
-            color: var(--on-surface);
-            display: flex;
-            flex-direction: column;
-            height: 100vh;
-        }
-
-        .header {
-            padding: 20px;
-            background-color: var(--surface);
-            border-bottom: 1px solid var(--surface-variant);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        h1 {
-            margin: 0;
-            font-size: 1.5rem;
-            color: var(--primary);
-        }
-
-        .container {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            grid-template-rows: 1fr 150px;
-            gap: 20px;
-            padding: 20px;
-            flex-grow: 1;
-            overflow: hidden;
-        }
-
-        .card {
-            background-color: var(--surface);
-            border-radius: 12px;
-            padding: 20px;
-            display: flex;
-            flex-direction: column;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-            overflow: hidden;
-        }
-
-        h2 {
-            margin-top: 0;
-            font-size: 1.2rem;
-            color: var(--secondary);
-            border-bottom: 1px solid var(--surface-variant);
-            padding-bottom: 10px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .input-group {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 15px;
-        }
-
-        input, textarea {
-            background: var(--surface-variant);
-            border: 1px solid #444;
-            color: white;
-            padding: 8px 12px;
-            border-radius: 6px;
-            flex-grow: 1;
-            outline: none;
-            font-family: inherit;
-        }
-
-        input:focus, textarea:focus {
-            border-color: var(--primary);
-        }
-
-        .list {
-            flex-grow: 1;
-            overflow-y: auto;
-        }
-
-        .item {
-            background-color: var(--surface-variant);
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 10px;
-            border-left: 4px solid var(--primary);
-            position: relative;
-            cursor: pointer;
-            transition: background-color 0.2s;
-        }
-
-        .item:hover {
-            background-color: #383838;
-        }
-
-        .item.done {
-            opacity: 0.6;
-            border-left-color: var(--on-surface-medium);
-        }
-
-        .item.done .item-title {
-            text-decoration: line-through;
-        }
-
-        .item-actions {
-            position: absolute;
-            right: 8px;
-            top: 50%;
-            transform: translateY(-50%);
-            display: flex;
-            gap: 8px;
-            opacity: 0;
-            transition: opacity 0.2s;
-        }
-
-        .item:hover .item-actions {
-            opacity: 1;
-        }
-
-        .btn-icon {
-            background: none;
-            border: none;
-            color: var(--on-surface-medium);
-            cursor: pointer;
-            padding: 6px;
-            font-size: 1.1rem;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 4px;
-        }
-
-        .btn-icon:hover {
-            color: var(--primary);
-            background: rgba(255, 255, 255, 0.1);
-        }
-
-        .btn-icon.delete:hover {
-            color: var(--error);
-        }
-
-        .item-title {
-            font-weight: bold;
-            margin-bottom: 4px;
-            padding-right: 70px;
-        }
-
-        .item-content {
-            font-size: 0.9rem;
-            color: var(--on-surface-medium);
-            padding-right: 70px;
-            white-space: pre-wrap;
-        }
-
-        .status-indicator {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background-color: var(--error);
-        }
-
-        .dot.online {
-            background-color: var(--secondary);
-            box-shadow: 0 0 8px var(--secondary);
-        }
-
-        button.primary {
-            background-color: var(--primary);
-            color: #000;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-weight: bold;
-            transition: opacity 0.2s;
-        }
-
-        button.primary:hover {
-            opacity: 0.8;
-        }
-
-        .badge {
-            font-size: 0.7rem;
-            padding: 2px 8px;
-            border-radius: 10px;
-            background: var(--surface-variant);
-            color: var(--primary);
-        }
-
-        .logs {
-            grid-column: span 2;
-            background-color: #000;
-            font-family: 'Consolas', monospace;
-            padding: 10px;
-            font-size: 0.8rem;
-            color: #0f0;
-            overflow-y: auto;
-            border: 1px solid #333;
-        }
-
-        .log-entry { margin-bottom: 2px; }
-        .log-time { color: #888; margin-right: 8px; }
-        .log-req { color: #03dac6; }
-        .log-res { color: #bb86fc; }
-
         #note-editor {
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            width: 80%;
-            max-width: 600px;
-            height: 70%;
-            background: var(--surface);
-            z-index: 200;
-            border-radius: 12px;
-            box-shadow: 0 0 40px rgba(0,0,0,0.8);
-            display: none;
-            flex-direction: column;
-            padding: 20px;
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 90%; max-width: 700px; height: 80%;
+            background: var(--surface); z-index: 200; border-radius: 12px;
+            box-shadow: 0 0 50px rgba(0,0,0,0.8); display: none;
+            flex-direction: column; padding: 20px; border: 1px solid var(--outline);
         }
-
         #editor-overlay {
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.7);
-            z-index: 199;
-            display: none;
+            position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 199; display: none;
         }
-
-        .editor-header {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 15px;
-            align-items: center;
-        }
+        .card { flex: 1; }
     </style>
 </head>
-
-<body>
-    <div id="login-section" style="display: none; position: fixed; inset: 0; background: var(--background); z-index: 1000; flex-direction: column; align-items: center; justify-content: center;">
+<body class="tool-content">
+    <div id="login-section" class="header hidden">
         <h1>Auth Required</h1>
-        <p style="color: var(--on-surface-medium); margin-bottom: 20px;">Please login to continue using Speax Tools.</p>
-        <button class="primary" id="login-btn" style="padding: 12px 24px;">Login with Google</button>
+        <button class="primary" onclick="window.location.href='/auth/login?client=tool'">Login with Google</button>
     </div>
 
-    <div class="header">
-        <h1>Speax Notes & Tools</h1>
+    <!-- We keep a simple header that can be hidden if parent handles it -->
+    <div class="header" id="tool-header">
+        <h1><span class="badge">Notes</span></h1>
         <div class="status-indicator">
             <div id="status-dot" class="dot"></div>
             <span id="status-text">Disconnected</span>
         </div>
     </div>
 
-    <div class="container">
-        <div class="card">
-            <h2>Tasks <span id="task-count" class="badge">0</span></h2>
-            <div class="input-group">
-                <input type="text" id="new-task-input" placeholder="Add a new task...">
-                <button class="primary" id="add-task-btn">Add</button>
+    <div class="tool-body">
+        <div class="tool-main">
+            <div class="card">
+                <h2>Tasks <span id="task-count" class="badge">0</span></h2>
+                <div class="input-group">
+                    <input type="text" id="new-task-input" placeholder="Add a new task...">
+                    <button class="primary" id="add-task-btn">Add</button>
+                </div>
+                <div id="task-list" class="list"></div>
             </div>
-            <div id="task-list" class="list"></div>
-        </div>
 
-        <div class="card">
-            <h2>Notes <span id="note-count" class="badge">0</span></h2>
-            <div class="input-group">
-                <input type="text" id="new-note-title" placeholder="Note Title">
-                <button class="primary" id="add-note-btn">New</button>
+            <div class="card">
+                <h2>Notes <span id="note-count" class="badge">0</span></h2>
+                <div class="input-group">
+                    <input type="text" id="new-note-title" placeholder="Note Title">
+                    <button class="primary" id="add-note-btn">New</button>
+                </div>
+                <div id="note-list" class="list"></div>
             </div>
-            <div id="note-list" class="list"></div>
         </div>
-
-        <div class="card logs" id="logs"></div>
+        <div id="logs" class="logs"></div>
     </div>
 
     <div id="editor-overlay"></div>
     <div id="note-editor">
-        <div class="editor-header">
-            <h2 id="editor-title" style="border:none; padding: 0; margin: 0;">Edit Note</h2>
+        <div style="display: flex; justify-content: space-between; margin-bottom: 1rem; align-items: center;">
+            <h2 id="editor-title">Edit Note</h2>
             <button class="btn-icon" id="close-editor">✕</button>
         </div>
-        <textarea id="editor-content" placeholder="Write your note here..." style="flex-grow: 1; margin-bottom: 15px; font-family: inherit; font-size: 1rem;"></textarea>
+        <textarea id="editor-content" placeholder="Write your note here..." style="flex-grow: 1; margin-bottom: 1rem; font-family: inherit; font-size: 1rem;"></textarea>
         <div style="display: flex; justify-content: flex-end; gap: 10px;">
             <button id="save-note-btn" class="primary">Save Changes</button>
         </div>
     </div>
 
     <script type="module">
-        import { SpeaxToolClient } from '/speax-tool-client.mjs?1';
+        import { SpeaxToolClient } from '/speax-tool-client.mjs';
+        import { checkAuth, setupStatusIndicator, createLogger } from '/tool-shared.mjs';
 
-        const statusDot = document.getElementById('status-dot');
-        const statusText = document.getElementById('status-text');
+        const logger = createLogger('logs');
         const taskList = document.getElementById('task-list');
         const noteList = document.getElementById('note-list');
         const taskCount = document.getElementById('task-count');
         const noteCount = document.getElementById('note-count');
-        const logsContainer = document.getElementById('logs');
-        
         const newTaskInput = document.getElementById('new-task-input');
         const addTaskBtn = document.getElementById('add-task-btn');
         const newNoteTitle = document.getElementById('new-note-title');
         const addNoteBtn = document.getElementById('add-note-btn');
-
         const editor = document.getElementById('note-editor');
         const overlay = document.getElementById('editor-overlay');
         const editorTitle = document.getElementById('editor-title');
@@ -336,18 +89,17 @@
         const saveNoteBtn = document.getElementById('save-note-btn');
         const closeEditor = document.getElementById('close-editor');
 
-        let currentEditingId = null;
-
-        function log(msg, type = '') {
-            const div = document.createElement('div');
-            div.className = `log-entry ${type ? 'log-' + type : ''}`;
-            const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-            div.innerHTML = `<span class="log-time">${time}</span> ${msg}`;
-            logsContainer.appendChild(div);
-            logsContainer.scrollTop = logsContainer.scrollHeight;
+        // Hide header if in iframe
+        if (window.parent !== window) {
+            document.getElementById('tool-header').classList.add('hidden');
         }
 
-        // --- Data Layer ---
+        if (!checkAuth()) {
+            document.getElementById('login-section').classList.remove('hidden');
+        }
+
+        let currentEditingId = null;
+
         const DB = {
             getTasks: () => JSON.parse(localStorage.getItem('speax_tasks') || '[]'),
             saveTasks: (tasks) => localStorage.setItem('speax_tasks', JSON.stringify(tasks)),
@@ -358,7 +110,6 @@
         function render() {
             const tasks = DB.getTasks();
             const notes = DB.getNotes();
-
             taskCount.textContent = tasks.length;
             noteCount.textContent = notes.length;
 
@@ -366,20 +117,25 @@
             tasks.forEach(t => {
                 const div = document.createElement('div');
                 div.className = `item ${t.done ? 'done' : ''}`;
+                div.style.opacity = t.done ? 0.6 : 1;
+                div.style.borderLeftColor = t.done ? 'var(--on-surface-medium)' : 'var(--primary)';
                 div.innerHTML = `
-370:                     <div class="item-title">${t.title || t.content || 'Untitled Task'}</div>
-371:                     <div class="item-actions">
-372:                         <button class="btn-icon" title="Toggle Done">✓</button>
-373:                         <button class="btn-icon delete" title="Delete Task">🗑</button>
-374:                     </div>
-375:                 `;
+                    <div style="font-weight: 600; ${t.done ? 'text-decoration: line-through' : ''}">${t.title || t.content}</div>
+                    <div style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); display: flex; gap: 4px;">
+                        <button class="btn-icon" title="Toggle Done">${t.done ? '↩' : '✓'}</button>
+                        <button class="btn-icon delete" title="Delete">🗑</button>
+                    </div>
+                `;
                 div.querySelector('button:not(.delete)').onclick = (e) => {
                     e.stopPropagation();
-                    window.completeTask(t.id);
+                    t.done = !t.done;
+                    DB.saveTasks(tasks);
+                    render();
                 };
                 div.querySelector('button.delete').onclick = (e) => {
                     e.stopPropagation();
-                    window.deleteTask(t.id);
+                    DB.saveTasks(DB.getTasks().filter(x => x.id !== t.id));
+                    render();
                 };
                 taskList.appendChild(div);
             });
@@ -390,42 +146,22 @@
                 div.className = 'item';
                 div.onclick = () => openNote(n.id);
                 div.innerHTML = `
-                    <div class="item-title">${n.title}</div>
-                    <div class="item-content">${n.content.substring(0, 80)}${n.content.length > 80 ? '...' : ''}</div>
-                    <div class="item-actions">
-                        <button class="btn-icon delete" title="Delete Note">🗑</button>
+                    <div style="font-weight: 600;">${n.title}</div>
+                    <div style="font-size: 0.85rem; color: var(--on-surface-medium); margin-top: 4px;">
+                        ${n.content.substring(0, 80)}${n.content.length > 80 ? '...' : ''}
+                    </div>
+                    <div style="position: absolute; right: 8px; top: 10px;">
+                        <button class="btn-icon delete" title="Delete">🗑</button>
                     </div>
                 `;
                 div.querySelector('button.delete').onclick = (e) => {
                     e.stopPropagation();
-                    window.deleteNote(n.id);
+                    DB.saveNotes(DB.getNotes().filter(x => x.id !== n.id));
+                    render();
                 };
                 noteList.appendChild(div);
             });
         }
-
-        // --- Action Handlers ---
-        window.deleteTask = (id) => {
-            const tasks = DB.getTasks().filter(t => t.id !== id);
-            DB.saveTasks(tasks);
-            render();
-        };
-
-        window.completeTask = (id) => {
-            const tasks = DB.getTasks();
-            const task = tasks.find(t => t.id === id);
-            if (task) {
-                task.done = !task.done;
-                DB.saveTasks(tasks);
-                render();
-            }
-        };
-
-        window.deleteNote = (id) => {
-            const notes = DB.getNotes().filter(n => n.id !== id);
-            DB.saveNotes(notes);
-            render();
-        };
 
         function openNote(id) {
             const note = DB.getNotes().find(n => n.id === id);
@@ -449,8 +185,7 @@
             editor.style.display = overlay.style.display = 'none';
         };
 
-        closeEditor.onclick = () => editor.style.display = overlay.style.display = 'none';
-        overlay.onclick = () => editor.style.display = overlay.style.display = 'none';
+        closeEditor.onclick = overlay.onclick = () => editor.style.display = overlay.style.display = 'none';
 
         addTaskBtn.onclick = () => {
             const val = newTaskInput.value.trim();
@@ -462,206 +197,85 @@
             render();
         };
 
-        newTaskInput.onkeypress = (e) => { if (e.key === 'Enter') addTaskBtn.onclick(); };
-
         addNoteBtn.onclick = () => {
             const title = newNoteTitle.value.trim();
             if (!title) return;
             const notes = DB.getNotes();
-            notes.unshift({ id: Date.now().toString(), title, content: '', modified: new Date().toISOString() });
+            const n = { id: Date.now().toString(), title, content: '', modified: new Date().toISOString() };
+            notes.unshift(n);
             DB.saveNotes(notes);
             newNoteTitle.value = '';
             render();
-            openNote(notes[0].id);
+            openNote(n.id);
         };
 
+        newTaskInput.onkeypress = (e) => { if (e.key === 'Enter') addTaskBtn.onclick(); };
         newNoteTitle.onkeypress = (e) => { if (e.key === 'Enter') addNoteBtn.onclick(); };
 
-        // --- Auth & Tool Client Integration ---
-        function checkAuth() {
-            return document.cookie.includes('speax_session=');
-        }
+        const client = new SpeaxToolClient(window.location.origin, 'NotesManager');
+        setupStatusIndicator(client, 'status-dot', 'status-text');
 
-        if (!checkAuth()) {
-            document.getElementById('login-section').style.display = 'flex';
-            document.getElementById('login-btn').onclick = () => window.location.href = '/auth/login?client=tool';
-        } else {
+        client.registerAction('list_tasks', 'Returns all saved tasks.', () => ({}), async () => {
+            logger.log('AI requested task list');
+            return { tasks: DB.getTasks() };
+        });
+
+        client.registerAction('add_task', 'Adds a new task.', () => ({
+            type: 'object',
+            properties: { 
+                content: { type: 'string' },
+                title: { type: 'string' }
+            },
+            required: ['content']
+        }), async (a) => {
+            const title = a.title || a.content;
+            logger.log(`AI adding task: "${title}"`);
+            const tasks = DB.getTasks();
+            const t = { id: Date.now().toString(), title, content: a.content || title, done: false };
+            tasks.unshift(t);
+            DB.saveTasks(tasks);
             render();
-            const client = new SpeaxToolClient(window.location.origin, 'NotesManager');
-            
-            client.onConnect = () => {
-                statusDot.className = 'dot online';
-                statusText.textContent = 'Connected & Registered';
-                log('Speax connection established.');
-            };
+            return { success: true, task: t };
+        });
 
-            client.onDisconnect = () => {
-                statusDot.className = 'dot';
-                statusText.textContent = 'Disconnected';
-                log('Speax connection lost.', 'res');
-            };
-
-            // Register actions for AI
-            client.registerAction('list_tasks', 'Returns all saved tasks.', () => ({}), async () => {
-                log('AI requested task list', 'req');
-                return { tasks: DB.getTasks() };
-            });
-
-            client.registerAction('add_task', 'Adds a new task.', () => ({
-                type: 'object',
-                properties: { 
-                    content: { type: 'string', description: 'The text or content of the task.' },
-                    title: { type: 'string', description: 'Optionally, a title for the task (mapped to content if missing).' }
-                },
-                required: ['content']
-            }), async (a) => {
-                const title = a.title || a.content;
-                log(`AI adding task: "${title}"`, 'req');
-                const tasks = DB.getTasks();
-                const t = { id: Date.now().toString(), title: title, content: a.content || title, done: false };
-                tasks.unshift(t);
+        client.registerAction('complete_task', 'Completes a task by ID or partial match.', () => ({
+            type: 'object', properties: { id: { type: 'string' } }, required: ['id']
+        }), async (a) => {
+            const tasks = DB.getTasks();
+            const t = tasks.find(x => x.id === a.id || (x.title && x.title.toLowerCase().includes(a.id.toLowerCase())));
+            if (t) {
+                t.done = true;
                 DB.saveTasks(tasks);
                 render();
-                return { success: true, task: t };
-            });
+                return { success: true };
+            }
+            return { success: false, error: 'Task not found' };
+        });
 
-            client.registerAction('complete_task', 'Completes a task by ID or partial title/content match.', () => ({
-                type: 'object',
-                properties: { id: { type: 'string' } },
-                required: ['id']
-            }), async (a) => {
-                log(`AI completing task: ${a.id}`, 'req');
-                const tasks = DB.getTasks();
-                const t = tasks.find(x => 
-                    x.id === a.id || 
-                    (x.title && x.title.toLowerCase().includes(a.id.toLowerCase())) ||
-                    (x.content && x.content.toLowerCase().includes(a.id.toLowerCase()))
-                );
-                if (t) {
-                    t.done = true;
-                    DB.saveTasks(tasks);
-                    render();
-                    return { success: true };
-                }
-                return { success: false, error: 'Task not found' };
-            });
+        client.registerAction('list_notes', 'Lists note titles and IDs.', () => ({}), async () => {
+            return { notes: DB.getNotes().map(n => ({ id: n.id, title: n.title })) };
+        });
 
-            client.registerAction('update_task', 'Updates a task\'s content or title.', () => ({
-                type: 'object',
-                properties: { 
-                    id: { type: 'string' },
-                    content: { type: 'string' },
-                    title: { type: 'string' }
-                },
-                required: ['id']
-            }), async (a) => {
-                log(`AI updating task: ${a.id}`, 'req');
-                const tasks = DB.getTasks();
-                const t = tasks.find(x => x.id === a.id || (x.title && x.title.toLowerCase().includes(a.id.toLowerCase())) || (x.content && x.content.toLowerCase().includes(a.id.toLowerCase())));
-                if (t) {
-                    if (a.content !== undefined) t.content = a.content;
-                    if (a.title !== undefined) t.title = a.title;
-                    DB.saveTasks(tasks);
-                    render();
-                    return { success: true, task: t };
-                }
-                return { success: false, error: 'Task not found' };
-            });
+        client.registerAction('add_note', 'Adds a new note.', () => ({
+            type: 'object', properties: { title: { type: 'string' }, content: { type: 'string' } }, required: ['title']
+        }), async (a) => {
+            const notes = DB.getNotes();
+            const n = { id: Date.now().toString(), title: a.title, content: a.content || '', modified: new Date().toISOString() };
+            notes.unshift(n);
+            DB.saveNotes(notes);
+            render();
+            return { success: true, note: n };
+        });
 
-            client.registerAction('delete_task', 'Deletes a task by ID or partial match.', () => ({
-                type: 'object',
-                properties: { id: { type: 'string' } },
-                required: ['id']
-            }), async (a) => {
-                log(`AI deleting task: ${a.id}`, 'req');
-                let tasks = DB.getTasks();
-                const len = tasks.length;
-                tasks = tasks.filter(x => 
-                    x.id !== a.id && 
-                    !(x.title && x.title.toLowerCase().includes(a.id.toLowerCase())) &&
-                    !(x.content && x.content.toLowerCase().includes(a.id.toLowerCase()))
-                );
-                if (tasks.length < len) {
-                    DB.saveTasks(tasks);
-                    render();
-                    return { success: true };
-                }
-                return { success: false, error: 'Task not found' };
-            });
+        client.registerAction('read_note', 'Reads a note by ID or title.', () => ({
+            type: 'object', properties: { id: { type: 'string' } }, required: ['id']
+        }), async (a) => {
+            const n = DB.getNotes().find(x => x.id === a.id || x.title.toLowerCase().includes(a.id.toLowerCase()));
+            return n ? { success: true, note: n } : { success: false, error: 'Note not found' };
+        });
 
-            client.registerAction('list_notes', 'Lists note titles and IDs.', () => ({}), async () => {
-                log('AI requested note list', 'req');
-                return { notes: DB.getNotes().map(n => ({ id: n.id, title: n.title })) };
-            });
-
-            client.registerAction('add_note', 'Adds a new note with title and content.', () => ({
-                type: 'object',
-                properties: { 
-                    title: { type: 'string' },
-                    content: { type: 'string' }
-                },
-                required: ['title', 'content']
-            }), async (a) => {
-                log(`AI adding note: "${a.title}"`, 'req');
-                const notes = DB.getNotes();
-                const n = { id: Date.now().toString(), title: a.title, content: a.content, modified: new Date().toISOString() };
-                notes.unshift(n);
-                DB.saveNotes(notes);
-                render();
-                return { success: true, note: n };
-            });
-
-            client.registerAction('read_note', 'Reads the full content of a note by ID or title match.', () => ({
-                type: 'object',
-                properties: { id: { type: 'string' } },
-                required: ['id']
-            }), async (a) => {
-                log(`AI reading note: ${a.id}`, 'req');
-                const n = DB.getNotes().find(x => x.id === a.id || x.title.toLowerCase().includes(a.id.toLowerCase()));
-                return n ? { success: true, note: n } : { success: false, error: 'Note not found' };
-            });
-
-            client.registerAction('update_note', 'Updates a note\'s full content.', () => ({
-                type: 'object',
-                properties: { 
-                    id: { type: 'string' },
-                    content: { type: 'string' }
-                },
-                required: ['id', 'content']
-            }), async (a) => {
-                log(`AI updating note: ${a.id}`, 'req');
-                const notes = DB.getNotes();
-                const n = notes.find(x => x.id === a.id || x.title.toLowerCase().includes(a.id.toLowerCase()));
-                if (n) {
-                    n.content = a.content;
-                    n.modified = new Date().toISOString();
-                    DB.saveNotes(notes);
-                    render();
-                    return { success: true, note: n };
-                }
-                return { success: false, error: 'Note not found' };
-            });
-
-            client.registerAction('delete_note', 'Deletes a note permanently.', () => ({
-                type: 'object',
-                properties: { id: { type: 'string' } },
-                required: ['id']
-            }), async (a) => {
-                log(`AI deleting note: ${a.id}`, 'req');
-                let notes = DB.getNotes();
-                const len = notes.length;
-                notes = notes.filter(x => x.id !== a.id && !x.title.toLowerCase().includes(a.id.toLowerCase()));
-                if (notes.length < len) {
-                    DB.saveNotes(notes);
-                    render();
-                    return { success: true };
-                }
-                return { success: false, error: 'Note not found' };
-            });
-
-            client.connect();
-        }
+        client.connect();
+        render();
     </script>
 </body>
-
 </html>

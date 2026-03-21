@@ -3,125 +3,49 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Speax Timer Tool</title>
+    <title>Speax Timers</title>
+    <link rel="stylesheet" href="/tool-shared.css">
     <style>
-        :root {
-            --primary: #bb86fc;
-            --secondary: #03dac6;
-            --background: #121212;
-            --surface: #1e1e1e;
-            --on-surface: #ffffff;
-            --on-surface-medium: #b3b3b3;
-            --error: #cf6679;
-            --outline: #333;
-        }
-
-        body {
-            font-family: 'Segoe UI', sans-serif;
-            margin: 0;
-            background-color: var(--background);
-            color: var(--on-surface);
-            display: flex;
-            flex-direction: column;
-            height: 100vh;
-            overflow: hidden;
-        }
-
-        .header {
-            padding: 15px 20px;
-            background-color: var(--surface);
-            border-bottom: 1px solid var(--outline);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .container {
-            display: grid;
-            grid-template-columns: 1fr;
-            grid-template-rows: 1fr 150px;
-            gap: 20px;
-            padding: 20px;
-            flex-grow: 1;
-            overflow: hidden;
-        }
-
-        .card {
-            background-color: var(--surface);
-            border-radius: 12px;
-            padding: 20px;
-            display: flex;
-            flex-direction: column;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-            overflow: hidden;
-        }
-
         .timer-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-            gap: 15px;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 1rem;
             overflow-y: auto;
+            flex: 1;
         }
-
         .timer-card {
-            background: #2d2d2d;
-            padding: 15px;
-            opacity: 1;
-            border-radius: 8px;
+            background: var(--surface-variant);
+            padding: 1.25rem;
+            border-radius: 12px;
             border-left: 4px solid var(--secondary);
             position: relative;
+            transition: transform 0.2s;
+            height: fit-content;
         }
-
-        .timer-card.expired {
-            border-left-color: var(--error);
-            animation: pulse 2s infinite;
-        }
+        .timer-card.expired { border-left-color: var(--error); animation: pulse 2s infinite; }
         .timer-card.done { opacity: 0.5; border-left-color: var(--on-surface-medium); }
-
+        
+        .timer-label { font-weight: 600; margin-bottom: 0.5rem; font-size: 0.9rem; }
+        .timer-time { font-size: 1.5rem; font-family: 'Fira Code', monospace; color: var(--primary); }
+        
         @keyframes pulse {
             0% { box-shadow: 0 0 0 0 rgba(207, 102, 121, 0.4); }
             70% { box-shadow: 0 0 0 10px rgba(207, 102, 121, 0); }
             100% { box-shadow: 0 0 0 0 rgba(207, 102, 121, 0); }
         }
-
-        .timer-label { font-weight: bold; margin-bottom: 5px; }
-        .timer-time { font-size: 1.5rem; font-family: monospace; color: var(--primary); }
-
-        .btn-delete {
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            background: none;
-            border: none;
-            color: var(--on-surface-medium);
-            cursor: pointer;
-        }
-
-        .logs {
-            background-color: #000;
-            font-family: monospace;
-            padding: 10px;
-            font-size: 0.8rem;
-            color: #0f0;
-            overflow-y: auto;
-            border: 1px solid #333;
-        }
-
-        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--error); display: inline-block; margin-right: 5px; }
-        .status-dot.online { background: var(--secondary); box-shadow: 0 0 8px var(--secondary); }
     </style>
 </head>
-<body>
-    <div class="header">
-        <h1>Speax Timers</h1>
-        <div>
-            <span id="status-dot" class="status-dot"></span>
+<body class="tool-content">
+    <div class="header" id="tool-header">
+        <h1><span class="badge">Timers</span></h1>
+        <div class="status-indicator">
+            <div id="status-dot" class="dot"></div>
             <span id="status-text">Disconnected</span>
         </div>
     </div>
 
-    <div class="container">
-        <div class="card">
+    <div class="tool-body">
+        <div class="tool-main">
             <div id="timer-list" class="timer-grid"></div>
         </div>
         <div id="logs" class="logs"></div>
@@ -129,32 +53,24 @@
 
     <script type="module">
         import { SpeaxToolClient } from '/speax-tool-client.mjs';
+        import { setupStatusIndicator, createLogger } from '/tool-shared.mjs';
 
+        const logger = createLogger('logs');
         const timerList = document.getElementById('timer-list');
-        const logsContainer = document.getElementById('logs');
         const statusDot = document.getElementById('status-dot');
         const statusText = document.getElementById('status-text');
+
+        if (window.parent !== window) document.getElementById('tool-header').classList.add('hidden');
 
         let timers = JSON.parse(localStorage.getItem('speax_timers') || '[]');
         let client = null;
 
-        function log(msg) {
-            const div = document.createElement('div');
-            div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
-            logsContainer.appendChild(div);
-            logsContainer.scrollTop = logsContainer.scrollHeight;
-        }
-
-        function save() {
-            localStorage.setItem('speax_timers', JSON.stringify(timers));
-        }
+        function save() { localStorage.setItem('speax_timers', JSON.stringify(timers)); }
 
         function render() {
             timerList.innerHTML = '';
             const now = Date.now();
             const oneHourAgo = now - (60 * 60 * 1000);
-            
-            // Auto-prune expired timers older than 1 hour
             timers = timers.filter(t => !(t.notified && t.end < oneHourAgo));
 
             timers.forEach(t => {
@@ -163,9 +79,9 @@
                 const statusClass = t.notified ? 'done' : (remaining === 0 ? 'expired' : '');
                 div.className = `timer-card ${statusClass}`;
                 div.innerHTML = `
-                    <button class="btn-delete" onclick="window.removeTimer('${t.id}')">✕</button>
+                    <button class="btn-icon delete" style="position: absolute; top: 10px; right: 10px;" onclick="window.removeTimer('${t.id}')">✕</button>
                     <div class="timer-label">${t.label}</div>
-                    <div class="timer-time">${t.notified ? 'Done' : formatTime(remaining)}</div>
+                    <div class="timer-time">${t.notified ? 'DONE' : formatTime(remaining)}</div>
                 `;
                 timerList.appendChild(div);
             });
@@ -185,14 +101,12 @@
             render();
         };
 
-        // Tick loop
         setInterval(() => {
             const now = Date.now();
             timers.forEach(t => {
-                // Only mark as notified if the websocket is actually connected
                 if (!t.notified && now >= t.end && client.socket?.readyState === WebSocket.OPEN) {
                     t.notified = true;
-                    log(`Timer Expired: ${t.label}`);
+                    logger.log(`Timer Expired: ${t.label}`);
                     client.sendEvent('TIMER_EXPIRED', { id: t.id, label: t.label });
                     save();
                 }
@@ -200,47 +114,26 @@
             render();
         }, 1000);
 
-        // Client Setup
         client = new SpeaxToolClient(window.location.origin, 'TimerTool');
-        
-        client.onConnect = () => {
-            statusDot.className = 'status-dot online';
-            statusText.textContent = 'Connected';
-            log('Speax connection active.');
-        };
+        setupStatusIndicator(client, 'status-dot', 'status-text');
 
-        client.registerAction('set_timer', 'Sets a countdown timer.', {
-            type: 'object',
-            properties: {
-                seconds: { type: 'number' },
-                label: { type: 'string' }
-            },
-            required: ['seconds']
-        }, async (args) => {
+        client.registerAction('set_timer', 'Sets a countdown timer.', () => ({
+            type: 'object', properties: { seconds: { type: 'number' }, label: { type: 'string' } }, required: ['seconds']
+        }), async (a) => {
             const id = Math.random().toString(36).substr(2, 9);
-            const timer = {
-                id,
-                label: args.label || 'Timer',
-                end: Date.now() + (args.seconds * 1000),
-                notified: false
-            };
+            const timer = { id, label: a.label || 'Timer', end: Date.now() + (a.seconds * 1000), notified: false };
             timers.push(timer);
             save();
-            log(`AI set timer: ${timer.label} (${args.seconds}s)`);
+            logger.log(`AI set timer: "${timer.label}" (${a.seconds}s)`);
             return { success: true, id };
         });
 
-        client.registerAction('list_timers', 'Lists all active and expired timers.', {}, async () => {
-            return { timers };
-        });
-
-        client.registerAction('cancel_timer', 'Cancels a timer by ID.', {
-            type: 'object',
-            properties: { id: { type: 'string' } },
-            required: ['id']
-        }, async (args) => {
-            const exists = timers.some(t => t.id === args.id);
-            timers = timers.filter(t => t.id !== args.id);
+        client.registerAction('list_timers', 'Lists all timers.', () => ({}), async () => ({ timers }));
+        client.registerAction('cancel_timer', 'Cancels a timer.', () => ({
+            type: 'object', properties: { id: { type: 'string' } }, required: ['id']
+        }), async (a) => {
+            const exists = timers.some(t => t.id === a.id);
+            timers = timers.filter(t => t.id !== a.id);
             save();
             return { success: exists };
         });
