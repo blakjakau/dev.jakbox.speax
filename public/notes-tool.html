@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Speax Notes</title>
     <link rel="stylesheet" href="/tool-shared.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <link rel="stylesheet" id="hljs-theme" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
     <style>
         #note-editor {
             position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -27,13 +27,14 @@
             padding: 20px; line-height: 1.6; color: var(--on-surface);
         }
         #view-content pre {
-            background: #1e1e1e; padding: 10px; border-radius: 6px; overflow-x: auto;
+            background: var(--surface-variant); padding: 10px; border-radius: 6px; overflow-x: auto;
+            border: 1px solid var(--outline);
         }
         #view-content code {
             font-family: 'Fira Code', 'Courier New', Courier, monospace;
         }
         #ace-editor-container {
-            flex-grow: 1; width: 100%; height: 100%; display: none;
+            flex-grow: 1; min-height: 300px; width: 100%; display: none;
         }
         #editor-footer {
             padding: 15px 20px; border-top: 1px solid var(--outline);
@@ -43,12 +44,171 @@
         #editor-overlay {
             position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 199; display: none;
         }
-        .card { flex: 1; }
         .item .type-badge {
             font-size: 0.7rem; padding: 2px 6px; border-radius: 4px;
             background: var(--outline); color: var(--on-surface-medium);
             margin-left: 8px; vertical-align: middle; text-transform: uppercase;
         }
+        .item .meta-badges {
+            display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap;
+        }
+        .meta-badge {
+            font-size: 0.72rem; padding: 2px 8px; border-radius: 12px;
+            background: var(--glass); color: var(--on-surface-medium); border: 1px solid var(--outline);
+            white-space: nowrap; transition: transform 0.2s;
+        }
+        .meta-badge:hover { transform: scale(1.05); }
+        .editor-meta-grid {
+            display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; padding: 15px 20px;
+            border-bottom: 1px solid var(--outline); background: rgba(0,0,0,0.1);
+        }
+        .editor-meta-grid div { display: flex; flex-direction: column; gap: 5px; }
+        .editor-meta-grid label { font-size: 0.75rem; color: var(--on-surface-medium); font-weight: 600; }
+        .editor-meta-grid input, .editor-meta-grid select { background: var(--surface-variant); border: 1px solid var(--outline); color: var(--on-surface); padding: 6px; border-radius: 4px; }
+        
+        /* New UI Elements */
+        .top-controls {
+            padding: 10px 20px; border-bottom: 1px solid var(--outline);
+            display: flex !important; justify-content: space-between; align-items: center; gap: 20px;
+            background: var(--surface); z-index: 10;
+        }
+        .tool-body { 
+            display: flex !important; 
+            flex-direction: row !important; 
+            gap: 0; 
+            height: calc(100vh - 120px); 
+            overflow: hidden !important; 
+            width: 100%;
+        }
+        .sidebar { 
+            width: 260px !important; 
+            min-width: 260px !important;
+            max-width: 260px !important;
+            background: rgba(0,0,0,0.1); 
+            border-right: 1px solid var(--outline);
+            display: flex !important; 
+            flex-direction: column; 
+            overflow-y: auto; 
+            padding: 20px; 
+            gap: 20px;
+            flex-shrink: 0 !important;
+        }
+        .tool-main { 
+            flex: 1 !important; 
+            overflow-y: auto; 
+            padding: 20px; 
+            background: rgba(0,0,0,0.05); 
+            min-width: 0; /* Prevents flex items from growing beyond parent */
+        }
+        
+        .sidebar-section h3 { font-size: 0.8rem; text-transform: uppercase; color: var(--on-surface-medium); margin-bottom: 10px; letter-spacing: 0.05em; }
+        .sidebar-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+        .sidebar-item { 
+            padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 0.9rem;
+            display: flex; justify-content: space-between; align-items: center;
+            transition: background 0.2s; border: 1px solid transparent;
+        }
+        .sidebar-item:hover { background: var(--glass); }
+        .sidebar-item.active { background: var(--primary-container); color: var(--on-primary-container); border-color: var(--primary); }
+        .sidebar-item .count { font-size: 0.75rem; opacity: 0.7; }
+
+        .tag-cloud { display: flex; flex-wrap: wrap; gap: 6px; }
+        .tag-item { 
+            font-size: 0.75rem; padding: 3px 8px; border-radius: 12px; border: 1px solid var(--outline);
+            cursor: pointer; transition: all 0.2s;
+        }
+        .tag-item.active { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
+
+        .note-grid { 
+            display: grid; gap: 16px; align-items: start;
+        }
+        .note-grid.grid-view { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+        .note-grid.list-view { display: flex; flex-direction: column; width: 100%; }
+        .note-grid.list-view .group-header { width: 100%; border-bottom: 1px solid var(--outline); padding-bottom: 8px; margin-bottom: 8px; }
+        .note-grid.list-view .item { width: 100%; margin-bottom: 0; }
+
+        .item { 
+            background: var(--surface); padding: 15px; border-radius: 8px; cursor: pointer;
+            border: 1px solid var(--outline); position: relative; 
+            transition: transform 0.2s, box-shadow 0.2s, border-left 0.2s; 
+            border-left: 4px solid transparent;
+        }
+        .item:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.3); transform: translateY(-2px); }
+        .grid-view .item { height: 180px; display: flex; flex-direction: column; }
+        .grid-view .item .content-preview { flex: 1; overflow: hidden; }
+        .list-view .item { height: auto !important; min-height: fit-content; margin-bottom: 12px; }
+        
+        .group-header { 
+            grid-column: 1 / -1; padding: 10px 0; margin-top: 20px; 
+            border-bottom: 1px solid var(--outline); color: var(--primary);
+            font-size: 1.1rem; font-weight: 600; display: flex; align-items: center; gap: 10px;
+        }
+        .group-header:first-child { margin-top: 0; }
+
+        .view-toggle { 
+            display: flex; background: var(--surface-variant); border-radius: 8px; padding: 2px;
+            border: 1px solid var(--outline);
+        }
+        .view-toggle button {
+            background: none; border: none; color: var(--on-surface-medium);
+            padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+            transition: all 0.2s;
+        }
+        .view-toggle button.active { background: var(--surface); color: var(--primary); box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+        
+        .btn-copy { opacity: 0; transition: opacity 0.2s; }
+        .item:hover .btn-copy { opacity: 1; }
+
+        .item.completed { 
+            opacity: 0.8; 
+            filter: grayscale(0.5);
+            border-style: dashed;
+            border-color: #4CAF50 !important;
+        }
+        .item.archived { 
+            opacity: 0.5; 
+            filter: grayscale(0.8) brightness(0.75);
+            border-style: dashed;
+            border-color: var(--on-surface-medium) !important;
+        }
+
+        /* Type Switcher */
+        .type-switcher { position: relative; cursor: pointer; }
+        .type-menu {
+            position: absolute; top: 100%; right: 0; 
+            background: var(--surface); border: 1px solid var(--outline);
+            border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            display: none; flex-direction: column; min-width: 120px; z-index: 300;
+            overflow: hidden; margin-top: 5px;
+        }
+        .type-menu div {
+            padding: 8px 16px; font-size: 0.8rem; color: var(--on-surface);
+            transition: background 0.2s; white-space: nowrap;
+        }
+        .type-menu div:hover { background: var(--surface-variant); }
+        .type-menu div.active { color: var(--primary); font-weight: 600; }
+
+        /* FAB */
+        .fab {
+            position: fixed; bottom: 30px; right: 30px;
+            width: 56px; height: 56px; border-radius: 50%;
+            background: var(--primary); color: var(--on-primary);
+            display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+            cursor: pointer; z-index: 100; transition: transform 0.2s, background 0.2s;
+            border: none; outline: none;
+        }
+        .fab:hover { transform: scale(1.1); background: var(--primary-container); }
+        .fab svg { width: 24px; height: 24px; }
+
+        #editor-title-input {
+            background: transparent; border: 1px solid transparent; 
+            color: var(--on-surface); font-size: 1.25rem; font-weight: 600;
+            padding: 4px 8px; border-radius: 4px; width: 100%; outline: none;
+            transition: border-color 0.2s;
+        }
+        #editor-title-input:focus { border-color: var(--outline); background: rgba(0,0,0,0.1); }
+        #note-editor.view-mode #editor-title-input { pointer-events: none; border-color: transparent; background: transparent; }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/markdown-it/dist/markdown-it.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -69,42 +229,109 @@
         </div>
     </div>
 
-    <div class="tool-body">
-        <div class="tool-main">
-            <div class="card">
-                <h2>Tasks <span id="task-count" class="badge">0</span></h2>
-                <div class="input-group">
-                    <input type="text" id="new-task-input" placeholder="Add a new task...">
-                    <button class="primary" id="add-task-btn">Add</button>
-                </div>
-                <div id="task-list" class="list"></div>
-            </div>
-
-            <div class="card">
-                <h2>Notes <span id="note-count" class="badge">0</span></h2>
-                <div class="input-group">
-                    <input type="text" id="new-note-title" placeholder="Note Title">
-                    <button class="primary" id="add-note-btn">New</button>
-                </div>
-                <div id="note-list" class="list"></div>
+    <div class="top-controls" id="top-controls">
+        <div style="display: flex; align-items: center; gap: 15px; flex-grow: 1;">
+            <h2 style="margin: 0; font-size: 1.2rem; white-space: nowrap;">Notes <span id="note-count" class="badge">0</span></h2>
+            <div style="display: flex; gap: 10px; flex-grow: 1; max-width: 600px;">
+                <input type="text" id="note-search" placeholder="Search title, content, tags..." style="flex-grow: 1; padding: 8px 16px; border-radius: 20px; background: var(--surface-variant); border: 1px solid var(--outline); color: var(--on-surface);">
             </div>
         </div>
-        <div id="logs" class="logs"></div>
+        <div class="view-toggle">
+            <button id="view-list" class="active" title="List View">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+            </button>
+            <button id="view-grid" title="Grid View">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+            </button>
+        </div>
     </div>
+
+    <div class="tool-body">
+        <div class="sidebar">
+            <div class="sidebar-section">
+                <h3>Group By</h3>
+                <div class="view-toggle" style="width: 100%;">
+                    <button id="group-project" class="active" style="flex:1">Project</button>
+                    <button id="group-status" style="flex:1">Status</button>
+                    <button id="group-tag" style="flex:1">Tags</button>
+                </div>
+            </div>
+            
+            <div id="sidebar-filters" class="sidebar-section">
+                <h3 id="filter-title">Projects</h3>
+                <ul id="filter-list" class="sidebar-list">
+                    <!-- Dynamic Items -->
+                </ul>
+            </div>
+
+            <div class="sidebar-section">
+                <h3>Tag Cloud</h3>
+                <div id="tag-cloud" class="tag-cloud">
+                    <!-- Dynamic Tags -->
+                </div>
+            </div>
+        </div>
+
+        <div class="tool-main">
+            <div class="card" style="height: 100%; display: flex; flex-direction: column; background: transparent; border: none; box-shadow: none; padding: 0;">
+                <div id="note-list" class="note-grid list-view" style="flex: 1; overflow-y: auto; padding-right: 5px;"></div>
+            </div>
+        </div>
+        <div id="logs" class="logs" style="display:none"></div>
+    </div>
+
+    <button id="add-note-fab" class="fab" title="New Note">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+        </svg>
+    </button>
 
     <div id="editor-overlay"></div>
     <div id="note-editor">
         <div id="editor-header">
-            <div style="display: flex; align-items: center; gap: 12px;">
-                <h2 id="editor-title" style="margin: 0;">View Note</h2>
-                <span id="editor-type-badge" class="badge" style="font-size: 0.7rem;">TEXT</span>
+            <div style="display: flex; align-items: center; gap: 12px; flex: 1;">
+                <input type="text" id="editor-title-input" value="Untitled Note" placeholder="Note Title...">
+                <div id="editor-type-container" class="type-switcher">
+                    <span id="editor-type-badge" class="badge" style="font-size: 0.7rem;">TEXT</span>
+                    <div id="editor-type-menu" class="type-menu">
+                        <div data-type="text">Text</div>
+                        <div data-type="markdown">Markdown</div>
+                        <div data-type="json">JSON</div>
+                    </div>
+                </div>
             </div>
             <div style="display: flex; gap: 8px;">
-                <button class="primary small" id="toggle-edit-btn">Edit</button>
+                <button class="primary small btn-icon" id="copy-modal-btn" title="Copy Content" style="width:32px; height:32px; padding:0; display:flex; align-items:center; justify-content:center;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                </button>
+                <button class="primary small btn-icon" id="toggle-edit-btn" title="Toggle Edit/View" style="width:32px; height:32px; padding:0; display:flex; align-items:center; justify-content:center;">
+                    <svg id="edit-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>
+                    <svg id="view-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                </button>
                 <button class="btn-icon" id="close-editor">✕</button>
             </div>
         </div>
         <div id="editor-body">
+            <div id="editor-meta" class="editor-meta-grid" style="display: none;">
+                <div>
+                    <label>Status</label>
+                    <select id="edit-status">
+                        <option value="active">Active</option>
+                        <option value="draft">Draft</option>
+                        <option value="archived">Archived</option>
+                        <option value="completed">Completed</option>
+                    </select>
+                </div>
+                <div>
+                    <label>Project</label>
+                    <input type="text" id="edit-project" placeholder="Project name">
+                </div>
+                <div>
+                    <label>Tags</label>
+                    <input type="text" id="edit-tags" placeholder="tag1, tag2...">
+                </div>
+            </div>
             <div id="view-content"></div>
             <div id="ace-editor-container"></div>
         </div>
@@ -118,24 +345,91 @@
         import { checkAuth, setupStatusIndicator, createLogger } from '/tool-shared.mjs';
 
         const logger = createLogger('logs');
-        const taskList = document.getElementById('task-list');
         const noteList = document.getElementById('note-list');
-        const taskCount = document.getElementById('task-count');
         const noteCount = document.getElementById('note-count');
-        const newTaskInput = document.getElementById('new-task-input');
-        const addTaskBtn = document.getElementById('add-task-btn');
-        const newNoteTitle = document.getElementById('new-note-title');
-        const addNoteBtn = document.getElementById('add-note-btn');
+        const addNoteFab = document.getElementById('add-note-fab');
+        const noteSearch = document.getElementById('note-search');
+        
         const editor = document.getElementById('note-editor');
         const overlay = document.getElementById('editor-overlay');
-        const editorTitle = document.getElementById('editor-title');
+        const editorTitleInput = document.getElementById('editor-title-input');
+        const editorMeta = document.getElementById('editor-meta');
         const viewContent = document.getElementById('view-content');
         const aceContainer = document.getElementById('ace-editor-container');
         const saveNoteBtn = document.getElementById('save-note-btn');
         const closeEditor = document.getElementById('close-editor');
         const toggleEditBtn = document.getElementById('toggle-edit-btn');
+        const editIcon = document.getElementById('edit-icon');
+        const viewIcon = document.getElementById('view-icon');
         const editorFooter = document.getElementById('editor-footer');
         const typeBadge = document.getElementById('editor-type-badge');
+        const typeMenu = document.getElementById('editor-type-menu');
+        const typeContainer = document.getElementById('editor-type-container');
+        const copyModalBtn = document.getElementById('copy-modal-btn');
+
+        // Dynamic highlight.js theme switching
+        const hljsTheme = document.getElementById('hljs-theme');
+        const darkThemeMedia = window.matchMedia('(prefers-color-scheme: dark)');
+        function updateHljsTheme() {
+            hljsTheme.href = darkThemeMedia.matches 
+                ? "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"
+                : "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css";
+        }
+        darkThemeMedia.addEventListener('change', () => {
+            updateHljsTheme();
+            render();
+        });
+        updateHljsTheme();
+
+        const editStatus = document.getElementById('edit-status');
+        const editProject = document.getElementById('edit-project');
+        const editTags = document.getElementById('edit-tags');
+
+        const viewListBtn = document.getElementById('view-list');
+        const viewGridBtn = document.getElementById('view-grid');
+        const groupProjectBtn = document.getElementById('group-project');
+        const groupStatusBtn = document.getElementById('group-status');
+        const groupTagBtn = document.getElementById('group-tag');
+        const filterTitle = document.getElementById('filter-title');
+        const filterList = document.getElementById('filter-list');
+        const tagCloudContainer = document.getElementById('tag-cloud');
+
+        let currentView = localStorage.getItem('speax_notes_view') || 'list';
+        let currentGrouping = localStorage.getItem('speax_notes_group') || 'project';
+        let activeFilters = new Set();
+        let selectedTags = new Set();
+
+        const DARK_COLORS = [
+            '#FF5252', '#FF4081', '#E040FB', '#7C4DFF', '#536DFE', '#448AFF', 
+            '#40C4FF', '#18FFFF', '#64FFDA', '#69F0AE', '#B2FF59', '#EEFF41', 
+            '#FFFF00', '#FFD740', '#FFAB40', '#FF6E40'
+        ];
+        // High-contrast darker colors for light mode
+        const LIGHT_COLORS = [
+            '#B71C1C', '#880E4F', '#4A148C', '#311B92', '#1A237E', '#0D47A1', 
+            '#01579B', '#006064', '#004D40', '#1B5E20', '#33691E', '#827717', 
+            '#AFB42B', '#F57F17', '#E65100', '#BF360C'
+        ];
+
+        function stringToColor(str) {
+            if (!str) return 'var(--outline)';
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = str.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            const colors = darkThemeMedia.matches ? DARK_COLORS : LIGHT_COLORS;
+            const index = Math.abs(hash) % colors.length;
+            return colors[index];
+        }
+
+        async function copyToClipboard(text) {
+            try {
+                await navigator.clipboard.writeText(text);
+                logger.log('Copied to clipboard');
+            } catch (err) {
+                logger.log('Failed to copy: ' + err);
+            }
+        }
 
         const md = window.markdownit({
             highlight: function (str, lang) {
@@ -161,77 +455,240 @@
         }
 
         const DB = {
-            getTasks: () => JSON.parse(localStorage.getItem('speax_tasks') || '[]'),
-            saveTasks: (tasks) => localStorage.setItem('speax_tasks', JSON.stringify(tasks)),
             getNotes: () => JSON.parse(localStorage.getItem('speax_notes') || '[]'),
             saveNotes: (notes) => localStorage.setItem('speax_notes', JSON.stringify(notes))
         };
 
         function render() {
-            const tasks = DB.getTasks();
-            const notes = DB.getNotes();
-            taskCount.textContent = tasks.length;
-            noteCount.textContent = notes.length;
+            const allNotes = DB.getNotes();
+            const query = noteSearch.value.trim().toLowerCase();
+            
+            // 1. Initial Filtering
+            let filteredNotes = allNotes.filter(n => {
+                const matchesQuery = !query || (
+                    n.title.toLowerCase().includes(query) || 
+                    n.content.toLowerCase().includes(query) || 
+                    (n.tags && n.tags.some(t => t.toLowerCase().includes(query))) || 
+                    (n.project && n.project.toLowerCase().includes(query))
+                );
 
-            taskList.innerHTML = '';
-            tasks.forEach(t => {
-                const div = document.createElement('div');
-                div.className = `item ${t.done ? 'done' : ''}`;
-                div.style.opacity = t.done ? 0.6 : 1;
-                div.style.borderLeftColor = t.done ? 'var(--on-surface-medium)' : 'var(--primary)';
-                div.innerHTML = `
-                    <div style="font-weight: 600; ${t.done ? 'text-decoration: line-through' : ''}">${t.title || t.content}</div>
-                    <div style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); display: flex; gap: 4px;">
-                        <button class="btn-icon" title="Toggle Done">${t.done ? '↩' : '✓'}</button>
-                        <button class="btn-icon delete" title="Delete">🗑</button>
-                    </div>
-                `;
-                div.querySelector('button:not(.delete)').onclick = (e) => {
-                    e.stopPropagation();
-                    t.done = !t.done;
-                    DB.saveTasks(tasks);
-                    render();
-                };
-                div.querySelector('button.delete').onclick = (e) => {
-                    e.stopPropagation();
-                    DB.saveTasks(DB.getTasks().filter(x => x.id !== t.id));
-                    render();
-                };
-                taskList.appendChild(div);
+                const matchesTags = selectedTags.size === 0 || (n.tags && n.tags.some(t => selectedTags.has(t)));
+                
+                // Hide archived/completed notes in Project view
+                if (currentGrouping === 'project' && (n.status === 'archived' || n.status === 'completed')) return false;
+
+                let matchesCategory = activeFilters.size === 0;
+                if (!matchesCategory) {
+                    if (currentGrouping === 'project') matchesCategory = activeFilters.has(n.project || 'No Project');
+                    if (currentGrouping === 'status') matchesCategory = activeFilters.has(n.status || 'active');
+                    if (currentGrouping === 'tag') matchesCategory = n.tags && n.tags.some(t => activeFilters.has(t));
+                }
+
+                return matchesQuery && matchesTags && matchesCategory;
             });
 
+            noteCount.textContent = filteredNotes.length;
+            noteList.className = `note-grid ${currentView}-view`;
             noteList.innerHTML = '';
-            notes.forEach(n => {
-                const div = document.createElement('div');
-                div.className = 'item';
-                div.onclick = () => openNote(n.id);
-                div.innerHTML = `
-                    <div style="font-weight: 600;">${n.title} <span class="type-badge">${n.type || 'text'}</span></div>
-                    <div style="font-size: 0.85rem; color: var(--on-surface-medium); margin-top: 4px;">
-                        ${n.content.substring(0, 80)}${n.content.length > 80 ? '...' : ''}
-                    </div>
-                    <div style="position: absolute; right: 8px; top: 10px;">
-                        <button class="btn-icon delete" title="Delete">🗑</button>
-                    </div>
-                `;
-                div.querySelector('button.delete').onclick = (e) => {
-                    e.stopPropagation();
-                    DB.saveNotes(DB.getNotes().filter(x => x.id !== n.id));
-                    render();
-                };
-                noteList.appendChild(div);
+
+            // 2. Update Sidebar Filters
+            updateSidebar(allNotes);
+
+            // 3. Group and Sort
+            const groups = {};
+            filteredNotes.forEach(n => {
+                let groupKey = 'Other';
+                if (currentGrouping === 'project') groupKey = n.project || 'No Project';
+                else if (currentGrouping === 'status') groupKey = n.status || 'active';
+                else if (currentGrouping === 'tag') {
+                    // For tags, we might show a note in multiple groups if grouping by tag?
+                    // Request says "toggle between grouping notes by project, status or tags"
+                    // If grouping by tags, we'll pick the first tag or 'Untagged'
+                    groupKey = (n.tags && n.tags.length > 0) ? n.tags[0] : 'Untagged';
+                }
+                
+                if (!groups[groupKey]) groups[groupKey] = [];
+                groups[groupKey].push(n);
             });
 
-            // Real-time update check
+            // 4. Render Groups
+            Object.keys(groups).sort().forEach(groupKey => {
+                const header = document.createElement('div');
+                header.className = 'group-header';
+                const color = stringToColor(groupKey);
+                header.innerHTML = `<span style="width:12px; height:12px; border-radius:50%; background:${color}"></span> ${groupKey} <span class="badge" style="font-size:0.7rem; opacity:0.6">${groups[groupKey].length}</span>`;
+                noteList.appendChild(header);
+
+                groups[groupKey].forEach(n => {
+                    const div = document.createElement('div');
+                    div.className = `item card ${n.status || ''}`;
+                    const groupColor = stringToColor(groupKey);
+                    div.style.borderLeftColor = groupColor;
+                    
+                    div.onclick = () => openNote(n.id);
+                    
+                    const tagBadges = (n.tags || []).map(t => `<span class="meta-badge" style="border-color:${stringToColor(t)}">${t}</span>`).join('');
+                    const projectBadge = n.project ? `<span class="meta-badge" style="background: ${stringToColor(n.project)}; color: var(--on-primary); border-color: ${stringToColor(n.project)}; font-weight: 600;">${n.project}</span>` : '';
+                    const statusBadge = n.status && n.status !== 'active' ? `<span class="meta-badge" style="opacity: 0.7;">${n.status}</span>` : '';
+
+                    div.innerHTML = `
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
+                            <div style="font-weight: 600; font-size: 1rem;">${n.title} <span class="type-badge">${n.type || 'text'}</span></div>
+                            <div style="display: flex; gap: 4px;">
+                                <button class="btn-icon btn-copy" title="Copy Content" style="opacity: 0.5;">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                                </button>
+                                <button class="btn-icon delete" title="Delete" style="opacity: 0.5;">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="content-preview" style="font-size: 0.85rem; color: var(--on-surface-medium); display: -webkit-box; -webkit-line-clamp: ${currentView === 'grid' ? '4' : '2'}; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.4; height: ${currentView === 'grid' ? '5.6em' : '2.8em'};">
+                            ${n.content || '<i style="opacity:0.5">Empty note</i>'}
+                        </div>
+                        <div style="margin-top: 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; width: 100%;">
+                            ${statusBadge}
+                            ${projectBadge}
+                            <div style="flex-grow: 1; min-width: 10px;"></div>
+                            <div style="display: flex; gap: 4px; flex-wrap: wrap-reverse; justify-content: flex-end;">
+                                ${tagBadges}
+                            </div>
+                        </div>
+                    `;
+                    div.querySelector('button.btn-copy').onclick = (e) => {
+                        e.stopPropagation();
+                        copyToClipboard(n.content);
+                    };
+                    div.querySelector('button.delete').onclick = (e) => {
+                        e.stopPropagation();
+                        DB.saveNotes(allNotes.filter(x => x.id !== n.id));
+                        render();
+                    };
+                    noteList.appendChild(div);
+                });
+            });
+
             if (currentEditingId && currentMode === 'view') {
-                const note = notes.find(n => n.id === currentEditingId);
+                const note = allNotes.find(n => n.id === currentEditingId);
                 if (note) renderNoteContent(note);
             }
         }
 
+        function updateSidebar(allNotes) {
+            // Update Filter Title
+            filterTitle.textContent = currentGrouping.charAt(0).toUpperCase() + currentGrouping.slice(1) + 's';
+            
+            // Collect Categories
+            const categories = {};
+            const allTags = new Set();
+            
+            allNotes.forEach(n => {
+                if (currentGrouping === 'project') {
+                    const p = n.project || 'No Project';
+                    categories[p] = (categories[p] || 0) + 1;
+                } else if (currentGrouping === 'status') {
+                    const s = n.status || 'active';
+                    categories[s] = (categories[s] || 0) + 1;
+                } else if (currentGrouping === 'tag') {
+                    if (n.tags && n.tags.length > 0) {
+                        n.tags.forEach(t => categories[t] = (categories[t] || 0) + 1);
+                    } else {
+                        categories['Untagged'] = (categories['Untagged'] || 0) + 1;
+                    }
+                }
+                if (n.tags) n.tags.forEach(t => allTags.add(t));
+            });
+
+            // Render Filter List
+            filterList.innerHTML = '';
+            Object.keys(categories).sort().forEach(cat => {
+                const li = document.createElement('li');
+                li.className = `sidebar-item ${activeFilters.has(cat) ? 'active' : ''}`;
+                const color = stringToColor(cat);
+                li.innerHTML = `
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="width:8px; height:8px; border-radius:50%; background:${color}"></span>
+                        <span>${cat}</span>
+                    </div>
+                    <span class="count">${categories[cat]}</span>
+                `;
+                li.onclick = () => {
+                    if (activeFilters.has(cat)) activeFilters.delete(cat);
+                    else activeFilters.add(cat);
+                    render();
+                };
+                filterList.appendChild(li);
+            });
+
+            // Render Tag Cloud
+            tagCloudContainer.innerHTML = '';
+            Array.from(allTags).sort().forEach(tag => {
+                const span = document.createElement('span');
+                span.className = `tag-item ${selectedTags.has(tag) ? 'active' : ''}`;
+                span.textContent = tag;
+                const color = stringToColor(tag);
+                if (selectedTags.has(tag)) {
+                    span.style.background = color;
+                    span.style.borderColor = color;
+                } else {
+                    span.style.color = color;
+                    span.style.borderColor = color + '44';
+                }
+                span.onclick = () => {
+                    if (selectedTags.has(tag)) selectedTags.delete(tag);
+                    else selectedTags.add(tag);
+                    render();
+                };
+                tagCloudContainer.appendChild(span);
+            });
+        }
+
+        // Event Listeners for View/Grouping
+        viewListBtn.onclick = () => {
+            currentView = 'list';
+            localStorage.setItem('speax_notes_view', 'list');
+            viewListBtn.classList.add('active');
+            viewGridBtn.classList.remove('active');
+            render();
+        };
+        viewGridBtn.onclick = () => {
+            currentView = 'grid';
+            localStorage.setItem('speax_notes_view', 'grid');
+            viewGridBtn.classList.add('active');
+            viewListBtn.classList.remove('active');
+            render();
+        };
+
+        const groupBtns = [groupProjectBtn, groupStatusBtn, groupTagBtn];
+        groupProjectBtn.onclick = () => switchGrouping('project', groupProjectBtn);
+        groupStatusBtn.onclick = () => switchGrouping('status', groupStatusBtn);
+        groupTagBtn.onclick = () => switchGrouping('tag', groupTagBtn);
+
+        function switchGrouping(g, btn) {
+            currentGrouping = g;
+            localStorage.setItem('speax_notes_group', g);
+            groupBtns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            activeFilters.clear();
+            render();
+        }
+
+        // Initialize view buttons
+        if (currentView === 'grid') {
+            viewGridBtn.classList.add('active');
+            viewListBtn.classList.remove('active');
+        }
+        if (currentGrouping === 'status') switchGrouping('status', groupStatusBtn);
+        if (currentGrouping === 'tag') switchGrouping('tag', groupTagBtn);
+
+        noteSearch.oninput = () => render();
+
         function renderNoteContent(note) {
-            const type = note.type || 'text';
+            const type = (note && note.type) || 'text';
             typeBadge.textContent = type.toUpperCase();
+            
+            // Mark active element in menu
+            typeMenu.querySelectorAll('div').forEach(d => d.classList.toggle('active', d.dataset.type === type));
             
             if (type === 'markdown') {
                 viewContent.innerHTML = md.render(note.content);
@@ -249,19 +706,23 @@
         }
 
         function openNote(id, mode = 'view') {
-            const note = DB.getNotes().find(n => n.id === id);
+            const notes = DB.getNotes();
+            const note = notes.find(n => n.id === id);
             if (!note) return;
             currentEditingId = id;
             currentMode = mode;
             
-            editorTitle.textContent = note.title;
+            editorTitleInput.value = note.title;
+            editor.classList.toggle('view-mode', mode === 'view');
             renderNoteContent(note);
             
             if (mode === 'view') {
                 viewContent.style.display = 'block';
                 aceContainer.style.display = 'none';
                 editorFooter.style.display = 'none';
-                toggleEditBtn.textContent = 'Edit';
+                editorMeta.style.display = 'none';
+                editIcon.style.display = 'block';
+                viewIcon.style.display = 'none';
             } else {
                 enterEditMode(note);
             }
@@ -272,11 +733,18 @@
 
         function enterEditMode(note) {
             currentMode = 'edit';
+            editor.classList.remove('view-mode');
             viewContent.style.display = 'none';
             aceContainer.style.display = 'block';
             editorFooter.style.display = 'flex';
-            toggleEditBtn.textContent = 'View';
+            editorMeta.style.display = 'grid';
+            editIcon.style.display = 'none';
+            viewIcon.style.display = 'block';
             
+            editStatus.value = note.status || 'active';
+            editProject.value = note.project || '';
+            editTags.value = (note.tags || []).join(', ');
+
             if (!aceEditor) {
                 aceEditor = ace.edit(aceContainer);
                 aceEditor.setTheme("ace/theme/monokai");
@@ -284,7 +752,8 @@
                     fontSize: "14px",
                     showPrintMargin: false,
                     useSoftTabs: true,
-                    tabSize: 2
+                    tabSize: 2,
+                    wrap: true
                 });
             }
             
@@ -312,122 +781,138 @@
 
         saveNoteBtn.onclick = () => {
             const notes = DB.getNotes();
-            const note = notes.find(n => n.id === currentEditingId);
-            if (note && aceEditor) {
-                note.content = aceEditor.getValue();
-                note.modified = new Date().toISOString();
+            const newTitle = editorTitleInput.value.trim() || 'Untitled Note';
+            
+            if (currentEditingId === 'new') {
+                const n = { 
+                    id: Date.now().toString(), 
+                    title: newTitle, 
+                    content: aceEditor ? aceEditor.getValue() : '', 
+                    type: 'text', 
+                    status: editStatus.value || 'active',
+                    project: editProject.value.trim(),
+                    tags: editTags.value.split(',').map(t => t.trim()).filter(t => t),
+                    modified: new Date().toISOString() 
+                };
+                notes.unshift(n);
                 DB.saveNotes(notes);
+                currentEditingId = n.id;
                 render();
                 openNote(currentEditingId, 'view');
+            } else {
+                const note = notes.find(n => n.id === currentEditingId);
+                if (note) {
+                    note.title = newTitle;
+                    if (aceEditor) note.content = aceEditor.getValue();
+                    note.status = editStatus.value;
+                    note.project = editProject.value.trim();
+                    note.tags = editTags.value.split(',').map(t => t.trim()).filter(t => t);
+                    note.modified = new Date().toISOString();
+                    DB.saveNotes(notes);
+                    render();
+                    openNote(currentEditingId, 'view');
+                }
+            }
+        };
+
+        addNoteFab.onclick = () => {
+            currentEditingId = 'new';
+            currentMode = 'edit';
+            
+            editorTitleInput.value = '';
+            viewContent.style.display = 'none';
+            aceContainer.style.display = 'block';
+            editorFooter.style.display = 'flex';
+            editorMeta.style.display = 'grid';
+            editor.classList.remove('view-mode');
+            editIcon.style.display = 'none';
+            viewIcon.style.display = 'block';
+            
+            editStatus.value = 'active';
+            editProject.value = '';
+            editTags.value = '';
+            typeBadge.textContent = 'TEXT';
+
+            if (!aceEditor) {
+                aceEditor = ace.edit(aceContainer);
+                aceEditor.setTheme("ace/theme/monokai");
+                aceEditor.setOptions({
+                    fontSize: "14px",
+                    showPrintMargin: false,
+                    useSoftTabs: true,
+                    tabSize: 2,
+                    wrap: true
+                });
+            }
+            aceEditor.session.setMode("ace/mode/text");
+            aceEditor.setValue('', -1);
+            
+            editor.style.display = 'flex';
+            overlay.style.display = 'block';
+            
+            setTimeout(() => editorTitleInput.focus(), 50);
+        };
+
+        copyModalBtn.onclick = () => {
+            const notes = DB.getNotes();
+            const note = notes.find(n => n.id === currentEditingId);
+            if (note) {
+                const content = currentMode === 'edit' && aceEditor ? aceEditor.getValue() : note.content;
+                copyToClipboard(content);
             }
         };
 
         closeEditor.onclick = overlay.onclick = () => editor.style.display = overlay.style.display = 'none';
 
-        addTaskBtn.onclick = () => {
-            const val = newTaskInput.value.trim();
-            if (!val) return;
-            const tasks = DB.getTasks();
-            tasks.unshift({ id: Date.now().toString(), content: val, done: false });
-            DB.saveTasks(tasks);
-            newTaskInput.value = '';
-            render();
+        // Type Switcher Logic
+        typeContainer.onclick = (e) => {
+            e.stopPropagation();
+            typeMenu.style.display = typeMenu.style.display === 'flex' ? 'none' : 'flex';
         };
 
-        addNoteBtn.onclick = () => {
-            const title = newNoteTitle.value.trim();
-            if (!title) return;
-            const notes = DB.getNotes();
-            const n = { id: Date.now().toString(), title, content: '', modified: new Date().toISOString() };
-            notes.unshift(n);
-            DB.saveNotes(notes);
-            newNoteTitle.value = '';
-            render();
-            openNote(n.id);
+        typeMenu.onclick = (e) => {
+            const newType = e.target.dataset.type;
+            if (newType) {
+                const notes = DB.getNotes();
+                const note = (currentEditingId === 'new') 
+                    ? { id: 'new', type: 'text', title: editorTitleInput.value, content: aceEditor ? aceEditor.getValue() : '' }
+                    : notes.find(n => n.id === currentEditingId);
+
+                if (note) {
+                    note.type = newType;
+                    // If existing note, update the DB
+                    if (currentEditingId !== 'new') {
+                        DB.saveNotes(notes);
+                        render();
+                    }
+                    renderNoteContent(note);
+                    if (currentMode === 'edit') {
+                        let aceMode = "ace/mode/text";
+                        if (newType === 'markdown') aceMode = "ace/mode/markdown";
+                        if (newType === 'json') aceMode = "ace/mode/json";
+                        aceEditor.session.setMode(aceMode);
+                    }
+                }
+                typeMenu.style.display = 'none';
+            }
         };
 
-        newTaskInput.onkeypress = (e) => { if (e.key === 'Enter') addTaskBtn.onclick(); };
-        newNoteTitle.onkeypress = (e) => { if (e.key === 'Enter') addNoteBtn.onclick(); };
+        document.addEventListener('click', () => typeMenu.style.display = 'none');
 
         const client = new SpeaxToolClient(window.location.origin, 'NotesManager');
         setupStatusIndicator(client, 'status-dot', 'status-text');
 
-        client.registerAction('list_tasks', 'Returns all saved tasks.', {}, async () => {
-            logger.log('AI requested task list');
-            return { tasks: DB.getTasks() };
-        });
-
-        client.registerAction('add_task', 'Adds a new task.', {
+        client.registerAction('list_notes', 'Lists note titles and IDs.', {
             type: 'object',
-            properties: { 
-                content: { type: 'string' },
-                title: { type: 'string' }
-            },
-            required: ['content']
-        }, async (a) => {
-            const title = a.title || a.content;
-            logger.log(`AI adding task: "${title}"`);
-            const tasks = DB.getTasks();
-            const t = { id: Date.now().toString(), title, content: a.content || title, done: false };
-            tasks.unshift(t);
-            DB.saveTasks(tasks);
-            render();
-            return { success: true, task: t };
-        });
-
-        client.registerAction('complete_task', 'Completes a task by ID or partial match.', {
-            type: 'object', properties: { id: { type: 'string' } }, required: ['id']
-        }, async (a) => {
-            const tasks = DB.getTasks();
-            const t = tasks.find(x => x.id === a.id || (x.title && x.title.toLowerCase().includes(a.id.toLowerCase())));
-            if (t) {
-                t.done = true;
-                DB.saveTasks(tasks);
-                render();
-                return { success: true };
+            properties: {
+                project: { type: 'string', description: 'Filter by project' },
+                status: { type: 'string', description: 'Filter by status' }
             }
-            return { success: false, error: 'Task not found' };
-        });
-
-        client.registerAction('update_task', 'Updates a task by ID or partial match.', {
-            type: 'object',
-            properties: { 
-                id: { type: 'string' },
-                content: { type: 'string' },
-                title: { type: 'string' },
-                done: { type: 'boolean' }
-            },
-            required: ['id']
         }, async (a) => {
-            const tasks = DB.getTasks();
-            const t = tasks.find(x => x.id === a.id || (x.title && x.title.toLowerCase().includes(a.id.toLowerCase())));
-            if (t) {
-                if (a.content !== undefined) t.content = a.content;
-                if (a.title !== undefined) t.title = a.title;
-                if (a.done !== undefined) t.done = a.done;
-                DB.saveTasks(tasks);
-                render();
-                return { success: true, task: t };
-            }
-            return { success: false, error: 'Task not found' };
-        });
-
-        client.registerAction('delete_task', 'Deletes a task by ID or partial match.', {
-            type: 'object', properties: { id: { type: 'string' } }, required: ['id']
-        }, async (a) => {
-            const tasks = DB.getTasks();
-            const initialLen = tasks.length;
-            const newTasks = tasks.filter(x => x.id !== a.id && !(x.title && x.title.toLowerCase().includes(a.id.toLowerCase())));
-            if (newTasks.length < initialLen) {
-                DB.saveTasks(newTasks);
-                render();
-                return { success: true };
-            }
-            return { success: false, error: 'Task not found' };
-        });
-
-        client.registerAction('list_notes', 'Lists note titles and IDs.', {}, async () => {
-            return { notes: DB.getNotes().map(n => ({ id: n.id, title: n.title })) };
+            let notes = DB.getNotes();
+            if (a.project) notes = notes.filter(n => n.project === a.project);
+            if (a.status) notes = notes.filter(n => n.status === a.status);
+            return { notes: notes.map(n => ({ id: n.id, title: n.title, project: n.project, status: n.status, tags: n.tags })) };
         });
 
         client.registerAction('add_note', 'Adds a new note.', {
@@ -435,7 +920,10 @@
             properties: { 
                 title: { type: 'string' }, 
                 content: { type: 'string' },
-                type: { type: 'string', enum: ['text', 'markdown', 'json'], default: 'text' }
+                type: { type: 'string', enum: ['text', 'markdown', 'json'], default: 'text' },
+                status: { type: 'string', enum: ['active', 'draft', 'archived', 'completed'] },
+                project: { type: 'string' },
+                tags: { type: 'array', items: { type: 'string' } }
             }, 
             required: ['title']
         }, async (a) => {
@@ -445,6 +933,9 @@
                 title: a.title, 
                 content: a.content || '', 
                 type: a.type || 'text',
+                status: a.status || 'active',
+                project: a.project || '',
+                tags: a.tags || [],
                 modified: new Date().toISOString() 
             };
             notes.unshift(n);
@@ -466,7 +957,10 @@
                 id: { type: 'string' },
                 title: { type: 'string' },
                 content: { type: 'string' },
-                type: { type: 'string', enum: ['text', 'markdown', 'json'] }
+                type: { type: 'string', enum: ['text', 'markdown', 'json'] },
+                status: { type: 'string', enum: ['active', 'draft', 'archived', 'completed'] },
+                project: { type: 'string' },
+                tags: { type: 'array', items: { type: 'string' } }
             }, 
             required: ['id']
         }, async (a) => {
@@ -476,12 +970,80 @@
                 if (a.title !== undefined) n.title = a.title;
                 if (a.content !== undefined) n.content = a.content;
                 if (a.type !== undefined) n.type = a.type;
+                if (a.status !== undefined) n.status = a.status;
+                if (a.project !== undefined) n.project = a.project;
+                if (a.tags !== undefined) n.tags = a.tags;
                 n.modified = new Date().toISOString();
                 DB.saveNotes(notes);
                 render();
                 return { success: true, note: n };
             }
             return { success: false, error: 'Note not found' };
+        });
+
+        client.registerAction('update_note_metadata', 'Bulk-updates notes metadata (project, status, tags).', {
+            type: 'object',
+            properties: {
+                ids: { type: 'array', items: { type: 'string' }, description: 'IDs of notes to update' },
+                status: { type: 'string', enum: ['active', 'draft', 'archived', 'completed'] },
+                project: { type: 'string' },
+                add_tags: { type: 'array', items: { type: 'string' } },
+                remove_tags: { type: 'array', items: { type: 'string' } }
+            },
+            required: ['ids']
+        }, async (a) => {
+            const notes = DB.getNotes();
+            let count = 0;
+            a.ids.forEach(id => {
+                const n = notes.find(x => x.id === id);
+                if (n) {
+                    if (a.status !== undefined) n.status = a.status;
+                    if (a.project !== undefined) n.project = a.project;
+                    if (a.add_tags) {
+                        n.tags = [...new Set([...(n.tags || []), ...a.add_tags])];
+                    }
+                    if (a.remove_tags) {
+                        n.tags = (n.tags || []).filter(t => !a.remove_tags.includes(t));
+                    }
+                    n.modified = new Date().toISOString();
+                    count++;
+                }
+            });
+            if (count > 0) {
+                DB.saveNotes(notes);
+                render();
+            }
+            return { success: true, updated_count: count };
+        });
+
+        client.registerAction('search_notes', 'Search notes using keyword or regex.', {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: 'Keyword or regex pattern' },
+                use_regex: { type: 'boolean', default: false }
+            },
+            required: ['query']
+        }, async (a) => {
+            const notes = DB.getNotes();
+            let results = [];
+            if (a.use_regex) {
+                const regex = new RegExp(a.query, 'i');
+                results = notes.filter(n => 
+                    regex.test(n.title) || 
+                    regex.test(n.content) || 
+                    (n.tags && regex.test(n.tags.join(' '))) || 
+                    (n.project && regex.test(n.project))
+                );
+            } else {
+                const q = a.query.toLowerCase();
+                results = notes.filter(n => 
+                    n.title.toLowerCase().includes(q) || 
+                    n.content.toLowerCase().includes(q) || 
+                    (n.tags && n.tags.some(t => t.toLowerCase().includes(q))) || 
+                    (n.project && n.project.toLowerCase().includes(q))
+                );
+            }
+            return { count: results.length, results: results.map(n => ({ id: n.id, title: n.title, project: n.project, tags: n.tags })) };
         });
 
         client.registerAction('delete_note', 'Deletes a note by ID or title.', {

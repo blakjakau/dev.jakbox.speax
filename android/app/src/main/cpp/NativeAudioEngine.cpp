@@ -70,7 +70,7 @@ public:
     std::atomic<bool> isStreamActive;
     std::atomic<bool> isMuted{false};
     bool hasTriggeredSpeechStart = false;
-    const int CONFIRMATION_SIZE = 16000 * 1.5; // 1.5 second min duration
+    const int CONFIRMATION_SIZE = 16000 * 1; // 1 second min duration
     
     std::vector<int16_t> preRollBuffer;
     const int PRE_ROLL_LIMIT = 10 * 512; // 10 frames (~0.3s) head buffer
@@ -323,7 +323,7 @@ aaudio_data_callback_result_t dataCallback(
                             ctx->jniQueue.push(std::move(cmd));
                             ctx->queueCv.notify_one();
                         } else {
-                            LOGD("VAD: Short utterance rejected (< 1.5s)");
+                            LOGD("VAD: Short utterance rejected (< 1s)");
                         }
                         ctx->accumulatedChunk.clear();
                     }
@@ -335,7 +335,7 @@ aaudio_data_callback_result_t dataCallback(
             if (res.isLoud) ctx->consecutiveSilenceFrames = 0;
             else ctx->consecutiveSilenceFrames++;
 
-            if (ctx->consecutiveSilenceFrames <= 20) { // Keep up to 20 frames of silence
+            if (ctx->consecutiveSilenceFrames <= 65) { // Keep up to 65 frames of silence (~2s)
                 std::lock_guard<std::mutex> bLock(ctx->bufferMutex);
                 ctx->accumulatedChunk.insert(ctx->accumulatedChunk.end(), frame, frame + ctx->VAD_FRAME_SIZE);
                 

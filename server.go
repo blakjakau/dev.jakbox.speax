@@ -77,12 +77,14 @@ var (
 )
 
 type WhisperNode struct {
-	URL              string
-	Zombie           bool
-	LastResponseTime time.Duration
-	FailureCount     int
-	TotalRequests    int
-	TotalFailures    int
+	URL                string
+	Zombie             bool
+	LastResponseTime   time.Duration // Last successful response time
+	LastExecutionTime  time.Duration // Last raw request latency (any attempt)
+	RollingCutoffRatio float64       // Normalized moving average of: (ExecutionTime / TimeoutThreshold)
+	FailureCount       int
+	TotalRequests      int
+	TotalFailures      int
 }
 
 var (
@@ -344,6 +346,56 @@ func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Ti
 	return false
 }
 
+// filterWhisperText determines if a transcription should be ignored as an artifact/hallucination
+func filterWhisperText(text string) (string, bool) {
+	text = strings.TrimSpace(text)
+	text = strings.ReplaceAll(text, "[BLANK_AUDIO]", "")
+	// Also remove common Whisper noise patterns
+	text = strings.ReplaceAll(text, "[Audio]", "")
+	text = strings.ReplaceAll(text, "(silence)", "")
+	text = strings.TrimSpace(text)
+
+	if text == "" || text == "." || text == "..." {
+		return "", true
+	}
+
+	lower := strings.ToLower(text)
+	// Remove common punctuation for hallucination check
+	cleaner := strings.Trim(lower, ".,!? ")
+
+	// Common Whisper artifacts/hallucinations
+	artifacts := []string{
+		"thank you",
+		"thank you.",
+		"thank you for watching",
+		"thanks for watching",
+		"bye",
+		"goodbye",
+		"you",
+		"please like and subscribe",
+	}
+
+	for _, a := range artifacts {
+		if cleaner == a {
+			return "", true
+		}
+	}
+
+	// Annotations like [BEEPING], (music), [AUDIO_OUT], etc.
+	// Check if it's entirely wrapped in brackets or parentheses
+	if (strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]")) ||
+		(strings.HasPrefix(text, "(") && strings.HasSuffix(text, ")")) {
+		return "", true
+	}
+
+	// Handle the very specific leading space " thank you" case
+	if strings.Contains(lower, "thank you") && len(text) < 15 {
+		return "", true
+	}
+
+	return text, false
+}
+
 func (s *ClientSession) ActiveThread() *Thread {
 	if s.ActiveThreadID == "" {
 		for id := range s.Threads {
@@ -394,6 +446,16 @@ func targetWebClients(session *ClientSession, data []byte) {
 		if meta.ClientType != "tool" {
 			conn.WriteMessage(websocket.TextMessage, data)
 		}
+	}
+}
+
+func broadcastWhisperStatus(session *ClientSession) {
+	whisperNodesMutex.RLock()
+	nodes := whisperNodes
+	data, err := json.Marshal(nodes)
+	whisperNodesMutex.RUnlock()
+	if err == nil {
+		sendOrBroadcastText(nil, session, []byte("[WHISPER_STATUS]"+string(data)))
 	}
 }
 
@@ -1270,36 +1332,15 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("[STT] Whisper Transcribed: '%s' (Start: %v)", text, bt.Format("15:04:05.000"))
 
-				text = strings.TrimSpace(strings.ReplaceAll(text, "[BLANK_AUDIO]", ""))
-
-				// Filter out Whisper artifacts like [ "..." ] or ( music )
-				isNonResponse := (strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]")) ||
-					(strings.HasPrefix(text, "(") && strings.HasSuffix(text, ")"))
-
-				// Aggressively suppress common hallucinated "polite" closers that trigger mid-conversation
-				cleanerText := strings.ToLower(strings.Trim(text, ".,! "))
-				isHallucination := cleanerText == "thank you" ||
-					cleanerText == "thank you." ||
-					cleanerText == "thank you.\nthank you." ||
-					cleanerText == "thank you.\nthank you" ||
-					cleanerText == "thank you. thank you" ||
-					cleanerText == "bye" ||
-					cleanerText == "bye." ||
-					cleanerText == "goodbye" ||
-					cleanerText == "goodbye."
-
-				if isHallucination {
-					isNonResponse = true
+				filteredText, isArtifact := filterWhisperText(text)
+				if isArtifact {
+					log.Printf("[STT] Suppressed Whisper artifact: '%s'", text)
+					safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
+					return
 				}
+				text = filteredText
 
-				if isNonResponse {
-					clientText := strings.Replace(text, "[", "(", 1)
-					clientText = strings.Replace(clientText, "]", ")", 1)
-					log.Printf("[STT] Filtered Whisper artifact, sending to client: %s", clientText)
-					// Inform client of the filtered non-response, which some clients use
-					// as a signal to resume paused TTS. This does NOT go to the LLM.
-					safeWrite(ws, session, websocket.TextMessage, []byte(clientText))
-				} else if text != "" && shouldProcessPrompt(session, text, bt) {
+				if shouldProcessPrompt(session, text, bt) {
 					session.Mutex.Lock()
 					if session.ActiveCancel != nil {
 						session.ActiveCancel()
@@ -1374,34 +1415,15 @@ func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, audio [
 	}
 	log.Printf("[STT-Stream] Final Whisper Transcribed: '%s'", text)
 
-	text = strings.TrimSpace(strings.ReplaceAll(text, "[BLANK_AUDIO]", ""))
-
-	// Filter out Whisper artifacts like [ "..." ] or ( music )
-	isNonResponse := (strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]")) ||
-		(strings.HasPrefix(text, "(") && strings.HasSuffix(text, ")"))
-
-	// Aggressively suppress common hallucinated "polite" closers
-	cleanerText := strings.ToLower(strings.Trim(text, ".,! "))
-	isHallucination := cleanerText == "thank you" ||
-		cleanerText == "thank you." ||
-		cleanerText == "thank you.\nthank you." ||
-		cleanerText == "thank you.\nthank you" ||
-		cleanerText == "thank you. thank you" ||
-		cleanerText == "bye" ||
-		cleanerText == "bye." ||
-		cleanerText == "goodbye" ||
-		cleanerText == "goodbye."
-
-	if isHallucination {
-		isNonResponse = true
+	filteredText, isArtifact := filterWhisperText(text)
+	if isArtifact {
+		log.Printf("[STT-Stream] Suppressed Whisper artifact: '%s'", text)
+		safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
+		return
 	}
+	text = filteredText
 
-	if isNonResponse {
-		clientText := strings.Replace(text, "[", "(", 1)
-		clientText = strings.Replace(clientText, "]", ")", 1)
-		log.Printf("[STT-Stream] Filtered Whisper artifact, sending to client: %s", clientText)
-		safeWrite(ws, session, websocket.TextMessage, []byte(clientText))
-	} else if text != "" && shouldProcessPrompt(session, text, session.StreamingStartTime) {
+	if text != "" && shouldProcessPrompt(session, text, session.StreamingStartTime) {
 		session.Mutex.Lock()
 		if session.ActiveCancel != nil {
 			session.ActiveCancel()
@@ -1478,6 +1500,17 @@ func queryWhisper(audioData []byte, session *ClientSession) (string, error) {
 		resp, err := http.Post(node.URL, writer.FormDataContentType(), body)
 		duration := time.Since(start)
 
+		// Update raw metrics for every request attempt
+		node.LastExecutionTime = duration
+		ratio := duration.Seconds() / timeoutDuration.Seconds()
+		const alpha = 0.2
+		if node.RollingCutoffRatio == 0 {
+			node.RollingCutoffRatio = ratio
+		} else {
+			node.RollingCutoffRatio = (ratio * alpha) + (node.RollingCutoffRatio * (1.0 - alpha))
+		}
+		broadcastWhisperStatus(session)
+
 		node.TotalRequests++
 		if err != nil || resp.StatusCode != http.StatusOK || duration > timeoutDuration {
 			node.FailureCount++
@@ -1511,6 +1544,7 @@ func queryWhisper(audioData []byte, session *ClientSession) (string, error) {
 		node.Zombie = false
 		node.LastResponseTime = duration
 		node.FailureCount = 0
+		broadcastWhisperStatus(session)
 		log.Printf("[STT] Node response: %s (Duration: %v)", node.URL, duration.Truncate(time.Millisecond))
 
 		defer resp.Body.Close()
@@ -1585,8 +1619,8 @@ func getSystemStatusPrompt() string {
 		if node.Zombie {
 			status = "Zombie / Slow"
 		}
-		sb.WriteString(fmt.Sprintf("- %s: %s (avg response: %v, failures: %d/%d)\n",
-			node.URL, status, node.LastResponseTime.Truncate(time.Millisecond), node.FailureCount, node.TotalFailures))
+		sb.WriteString(fmt.Sprintf("- %s: %s (last latency: %v, rolling cutoff ratio: %.2f, failures: %d/%d)\n",
+			node.URL, status, node.LastExecutionTime.Truncate(time.Millisecond), node.RollingCutoffRatio, node.FailureCount, node.TotalFailures))
 	}
 	return sb.String()
 }

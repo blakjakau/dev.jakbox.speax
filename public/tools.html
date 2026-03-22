@@ -15,12 +15,12 @@
             display: flex;
             flex-direction: column;
             overflow: hidden;
-            background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 100%);
+            background: var(--background);
         }
 
         .navbar {
             height: var(--nav-height);
-            background: rgba(30, 30, 30, 0.8);
+            background: var(--surface);
             backdrop-filter: blur(10px);
             border-bottom: 1px solid var(--glass-border);
             display: flex;
@@ -34,7 +34,6 @@
             font-size: 1.5rem;
             font-weight: 700;
             color: var(--primary);
-            text-shadow: 0 0 10px rgba(187, 134, 252, 0.3);
             margin-right: 1rem;
         }
 
@@ -155,23 +154,41 @@
         const tabs = document.querySelectorAll('.tab');
         const iframes = document.querySelectorAll('iframe');
 
+        function switchTab(tool) {
+            // Update tabs
+            tabs.forEach(t => {
+                if (t.dataset.tool === tool) {
+                    t.classList.add('active');
+                } else {
+                    t.classList.remove('active');
+                }
+            });
+
+            // Update iframes
+            iframes.forEach(iframe => {
+                if (iframe.id === `iframe-${tool}`) {
+                    iframe.classList.add('active');
+                } else {
+                    iframe.classList.remove('active');
+                }
+            });
+
+            // Persist
+            localStorage.setItem('speax_last_tool', tool);
+        }
+
         tabs.forEach(tab => {
             tab.addEventListener('click', () => {
-                const tool = tab.dataset.tool;
-                
-                // Update tabs
-                tabs.forEach(t => t.classList.remove('active'));
-                tab.classList.add('active');
-
-                // Update iframes
-                iframes.forEach(iframe => {
-                    iframe.classList.remove('active');
-                    if (iframe.id === `iframe-${tool}`) {
-                        iframe.classList.add('active');
-                    }
-                });
+                switchTab(tab.dataset.tool);
             });
         });
+
+        // Initialize from storage
+        const lastTool = localStorage.getItem('speax_last_tool');
+        if (lastTool) {
+            const tabExists = Array.from(tabs).some(t => t.dataset.tool === lastTool);
+            if (tabExists) switchTab(lastTool);
+        }
 
         // Listen for events from tools
         window.addEventListener('message', (event) => {

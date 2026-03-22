@@ -1,15 +1,40 @@
 :root {
-    --primary: #bb86fc;
-    --secondary: #03dac6;
-    --background: #121212;
-    --surface: #1e1e1e;
-    --surface-variant: #2d2d2d;
-    --on-surface: #ffffff;
-    --on-surface-medium: #b3b3b3;
-    --error: #cf6679;
-    --outline: #333;
-    --glass: rgba(255, 255, 255, 0.05);
-    --glass-border: rgba(255, 255, 255, 0.1);
+    /* Light Theme (Default) */
+    --primary: #6200ee;
+    --secondary: #018786;
+    --background: #f5f5f5;
+    --surface: #ffffff;
+    --surface-variant: #f0f0f0;
+    --on-surface: #121212;
+    --on-surface-medium: #666666;
+    --on-primary: #ffffff;
+    --primary-container: #eaddff;
+    --on-primary-container: #21005d;
+    --error: #b00020;
+    --outline: #dddddd;
+    --primary-glow: rgba(98, 0, 238, 0.2);
+    --glass: rgba(0, 0, 0, 0.05);
+    --glass-border: rgba(0, 0, 0, 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --primary: #bb86fc;
+        --secondary: #03dac6;
+        --background: #121212;
+        --surface: #1e1e1e;
+        --surface-variant: #2d2d2d;
+        --on-surface: #ffffff;
+        --on-surface-medium: #b3b3b3;
+        --on-primary: #000000;
+        --primary-container: #4f378b;
+        --on-primary-container: #eaddff;
+        --error: #cf6679;
+        --outline: #444444;
+        --primary-glow: rgba(187, 134, 252, 0.3);
+        --glass: rgba(255, 255, 255, 0.05);
+        --glass-border: rgba(255, 255, 255, 0.1);
+    }
 }
 
 * {
@@ -116,12 +141,12 @@ button {
 
 button.primary {
     background: var(--primary);
-    color: #000;
+    color: var(--on-primary);
 }
 button.primary:hover {
     opacity: 0.9;
     transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(187, 134, 252, 0.3);
+    box-shadow: 0 4px 12px var(--primary-glow);
 }
 
 button.secondary {
@@ -188,7 +213,8 @@ input:focus, textarea:focus, select:focus {
 }
 
 .item:hover {
-    background: #333;
+    background: var(--surface);
+    border-color: var(--primary);
     transform: translateX(4px);
 }
 
