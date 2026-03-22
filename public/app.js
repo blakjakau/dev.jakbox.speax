@@ -24,7 +24,8 @@ let reconnectDelay = 1000;
 const MAX_RECONNECT_DELAY = 5000;
 let isDictationActive = false;
 let isPaused = false;
-let lastSummaryData = { estTokens: 0, maxTokens: 8192, archiveTurns: 0, maxArchiveTurns: 100, text: "No summary generated yet." };
+let speechStartTime = 0; // Recorded when VAD trips
+let lastSummaryData = { estTokens: 0, maxTokens: 8192, archiveTurns: 0, maxArchiveTurns: 250, text: "No summary generated yet." };
 let lastTokenUsage = {};
 
 // Web STT Engine States
@@ -38,9 +39,14 @@ const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecogni
 const isNativeSttSupported = !!SpeechRecognition;
 
 const NOISE_THRESHOLD = 0.015; // RMS threshold. Increase if your room is noisy!
+let averageSpeechRms = 0.05; // Baseline adaptive RMS tracker
 const SILENCE_FRAMES_LIMIT = 6; // ~0.75 seconds of trailing silence to stop
 const PRE_ROLL_FRAMES = 2; // ~0.5 seconds of audio to keep BEFORE speech is detected
 const MIN_CHUNKS = 2; // Require at least ~0.5 seconds of audio to bother sending
+const STREAMING_INTERVAL_MS = 1500;
+let streamingInterval = null;
+let isStreaming = false;
+let currentSeqID = 0n;
 
 const ICON_POWER = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>`;
 const ICON_ALYX = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="width: 50%; height: 50%;">
@@ -80,15 +86,15 @@ async function getDeviceInfo() {
             console.warn("Could not get high-entropy user agent data, falling back.", error);
         }
     }
-    
+
     // Fallback for browsers that don't support User-Agent Client Hints API
-	const ua = navigator.userAgent;
-	if (/Android/i.test(ua)) return "Android Browser";
-	if (/iPhone|iPad|iPod/i.test(ua)) return "iOS Browser";
-	if (/Windows/i.test(ua)) return "Windows Browser";
-	if (/Macintosh/i.test(ua)) return "macOS Browser";
-	if (/Linux/i.test(ua)) return "Linux Browser";
-	return "Unknown Browser";
+    const ua = navigator.userAgent;
+    if (/Android/i.test(ua)) return "Android Browser";
+    if (/iPhone|iPad|iPod/i.test(ua)) return "iOS Browser";
+    if (/Windows/i.test(ua)) return "Windows Browser";
+    if (/Macintosh/i.test(ua)) return "macOS Browser";
+    if (/Linux/i.test(ua)) return "Linux Browser";
+    return "Unknown Browser";
 }
 
 const status = document.getElementById('status');
@@ -146,19 +152,63 @@ const aiVoice = document.getElementById('aiVoice');
 const storageMode = document.getElementById('storageMode');
 const saveSettingsBtn = document.getElementById('saveSettingsBtn');
 
-// Dynamically inject Local TTS UI toggle so we don't need to touch index.html
+// Dynamically inject Mic Profile UI dropdown
+const micProfileContainer = document.createElement('div');
+micProfileContainer.style.display = 'flex';
+micProfileContainer.style.alignItems = 'center';
+micProfileContainer.style.margin = '12px 0';
+micProfileContainer.innerHTML = `
+    <span style="flex-grow:1; color:var(--on-surface);">Mic Profile</span>
+    <select id="micProfileSelect" style="padding:4px; border-radius:4px; background:var(--surface-variant); color:var(--on-surface); border:1px solid var(--outline);">
+        <option value="sensitive">Sensitive (Low Filtering)</option>
+        <option value="standard">Standard</option>
+        <option value="adaptive">Adaptive Filtering</option>
+        <option value="heavy">Heavy Filtering</option>
+        <option value="mute_playback">Mute on Playback</option>
+    </select>
+`;
+if (storageMode) storageMode.parentNode.insertBefore(micProfileContainer, storageMode.nextSibling);
+const micProfileSelect = document.getElementById('micProfileSelect');
+let currentMicProfile = localStorage.getItem('speax_mic_profile') || 'standard';
+if (micProfileSelect) micProfileSelect.value = currentMicProfile;
+micProfileSelect.addEventListener('change', () => {
+    currentMicProfile = micProfileSelect.value;
+    localStorage.setItem('speax_mic_profile', currentMicProfile);
+
+    // If we're recording, we might need to restart it to apply new device constraints
+    if (inContext && inContext.state !== 'closed' && (currentMicProfile === 'heavy' || localStorage.getItem('speax_mic_profile') === 'heavy' || currentMicProfile === 'sensitive' || localStorage.getItem('speax_mic_profile') === 'sensitive')) {
+        // Need to ask for new constraints from getUserMedia if switching to/from heavy or sensitive
+    }
+});
+
+// Dynamically inject Local TTS UI toggle
 const localTtsContainer = document.createElement('div');
 localTtsContainer.style.display = 'flex';
 localTtsContainer.style.alignItems = 'center';
 localTtsContainer.style.margin = '12px 0';
 localTtsContainer.innerHTML = `
-    <span style="flex-grow:1; color:var(--on-surface);">Use Local TTS (Piper)</span>
+    <span style="flex-grow:1; color:var(--on-surface);">Use Local TTS</span>
     <input type="checkbox" id="useLocalTtsToggle">
 `;
-if (storageMode) storageMode.parentNode.insertBefore(localTtsContainer, storageMode.nextSibling);
+if (micProfileContainer) micProfileContainer.parentNode.insertBefore(localTtsContainer, micProfileContainer.nextSibling);
 const useLocalTtsToggle = document.getElementById('useLocalTtsToggle');
 let useLocalTts = localStorage.getItem('speax_local_tts') === 'true';
 if (useLocalTtsToggle) useLocalTtsToggle.checked = useLocalTts;
+
+// Dynamically inject Passive Assistant UI toggle
+const passiveAssistantContainer = document.createElement('div');
+passiveAssistantContainer.style.display = 'flex';
+passiveAssistantContainer.style.alignItems = 'center';
+passiveAssistantContainer.style.margin = '12px 0';
+passiveAssistantContainer.innerHTML = `
+    <span style="flex-grow:1; color:var(--on-surface);" title="Only responds when addressed by name (e.g. Alyx)">Passive Assistant</span>
+    <input type="checkbox" id="passiveAssistantToggle">
+`;
+localTtsContainer.parentNode.insertBefore(passiveAssistantContainer, localTtsContainer.nextSibling);
+const passiveAssistantToggle = document.getElementById('passiveAssistantToggle');
+let passiveAssistant = localStorage.getItem('speax_passive_assistant') === 'true';
+if (passiveAssistantToggle) passiveAssistantToggle.checked = passiveAssistant;
+
 
 aiProvider.value = localStorage.getItem('speax_provider') || 'ollama';
 geminiApiKey.value = localStorage.getItem('speax_gemini_key') || '';
@@ -173,7 +223,7 @@ let serverClient = null; // initialized below
 async function loadModels() {
     const provider = aiProvider.value;
     const apiKey = geminiApiKey.value;
-    
+
     if (provider === 'gemini' && !apiKey) {
         aiModel.innerHTML = '<option value="">Enter API Key first...</option>';
         return;
@@ -261,17 +311,17 @@ if (isNativeSttSupported) {
         if (interimTranscript) {
             status.innerText = `Hearing: ${interimTranscript}`;
         }
-        
+
         // True Barge-in: Suspend TTS immediately if we hear words (including Web Speech API)
         const isAiActive = (currentAiDiv !== null || isPlayingAudio || window.speechSynthesis.speaking);
         if ((interimTranscript || finalTranscript) && isAiActive && !isPaused) {
-            if (outContext && outContext.state === 'running') outContext.suspend();
+            stopAudio();
             window.speechSynthesis.cancel(); // Barge-in = stop talking!
         }
 
         if (finalTranscript) {
             const cleanText = finalTranscript.trim();
-            
+
             if (nativeSttBuffer && cleanText.toLowerCase().startsWith(nativeSttBuffer.toLowerCase())) {
                 // Android Chrome Bug: The engine passes the entire cumulative sentence history 
                 // in the newest chunk instead of just the delta. We overwrite to prevent duplication.
@@ -280,7 +330,7 @@ if (isNativeSttSupported) {
                 // Desktop Chrome: Standard behavior, returns discrete new words.
                 nativeSttBuffer = nativeSttBuffer ? `${nativeSttBuffer} ${cleanText}` : cleanText;
             }
-            
+
             status.innerText = `Heard: ${nativeSttBuffer}`;
         }
 
@@ -308,7 +358,7 @@ if (isNativeSttSupported) {
     useNativeSttToggle.onchange = (e) => {
         useNativeStt = e.target.checked;
         localStorage.setItem('speax_use_native_stt', useNativeStt);
-        
+
         if (serverClient && serverClient.isOpen() && !isMuted && !isPaused) {
             if (useNativeStt) {
                 stopRecording(); // Tear down custom VAD
@@ -324,21 +374,21 @@ if (isNativeSttSupported) {
 
 function flushNativeSttBuffer() {
     if (nativeSttBuffer && serverClient && serverClient.isOpen()) {
-        serverClient.send(`[TEXT_PROMPT]:${nativeSttBuffer}`);
+        serverClient.send(`[TEXT_PROMPT:${Date.now()}]:${nativeSttBuffer}`);
         stopAudio();
         status.innerText = `Heard: ${nativeSttBuffer}`;
-        
+
         clearTimeout(statusResetTimeout);
         statusResetTimeout = setTimeout(() => {
             if (status.innerText.startsWith("Heard:")) {
                 status.innerText = "Listening (Browser)...";
             }
         }, 3000);
-        } else if (!nativeSttBuffer && (currentAiDiv !== null || isPlayingAudio) && !isPaused) {
-            // False alarm (e.g. cough or background noise): Resume TTS!
-            if (outContext && outContext.state === 'suspended') {
-                outContext.resume();
-            }
+    } else if (!nativeSttBuffer && (currentAiDiv !== null || isPlayingAudio) && !isPaused) {
+        // False alarm (e.g. cough or background noise): Resume TTS!
+        if (outContext && outContext.state === 'suspended') {
+            outContext.resume();
+        }
     }
     nativeSttBuffer = "";
 }
@@ -350,28 +400,28 @@ let isGeneratingLocalTts = false;
 async function processLocalTtsQueue() {
     if (isGeneratingLocalTts || localTtsQueue.length === 0) return;
     isGeneratingLocalTts = true;
-    
+
     const text = localTtsQueue.shift();
     console.log("[Local TTS] Synthesizing chunk:", text);
-    
+
     try {
         await new Promise((resolve) => {
             const utterance = new SpeechSynthesisUtterance(text);
-            
+
             // Optional: If you ever select a native browser voice in the dropdown, it will try to use it!
             const voices = window.speechSynthesis.getVoices();
             const selectedVoice = voices.find(v => v.name === aiVoice.value);
             if (selectedVoice) utterance.voice = selectedVoice;
-            
+
             utterance.onend = resolve;
             utterance.onerror = resolve; // Resolve on error so the queue doesn't jam
-            
+
             window.speechSynthesis.speak(utterance);
         });
     } catch (err) {
         console.error("Local TTS Error:", err);
     }
-    
+
     isGeneratingLocalTts = false;
     processLocalTtsQueue(); // Check for next chunk
 }
@@ -396,12 +446,17 @@ saveSettingsBtn.onclick = () => {
     localStorage.setItem('speax_voice', aiVoice.value);
     localStorage.setItem('speax_user_name', userName.value);
     localStorage.setItem('speax_user_bio', userBio.value);
-    
+
     if (useLocalTtsToggle) {
         useLocalTts = useLocalTtsToggle.checked;
         localStorage.setItem('speax_local_tts', useLocalTts);
     }
-    
+
+    if (passiveAssistantToggle) {
+        passiveAssistant = passiveAssistantToggle.checked;
+        localStorage.setItem('speax_passive_assistant', passiveAssistant);
+    }
+
     const isClient = storageMode.value === 'client';
     const wasClient = memoryManager.isClientSide;
 
@@ -433,7 +488,7 @@ if (document.cookie.includes('speax_session=')) {
     appSection.style.display = 'flex';
     threadsFab.style.display = 'flex';
     userProfileContainer.style.display = 'block';
-    
+
     const avatarCookie = document.cookie.split('; ').find(row => row.startsWith('speax_avatar='));
     if (avatarCookie) {
         userAvatarBtn.src = decodeURIComponent(avatarCookie.split('=')[1]);
@@ -474,7 +529,7 @@ const chatSendBtn = document.getElementById('chatSendBtn');
 function sendTypedMessage() {
     const text = chatTextInput.value.trim();
     if (text && serverClient && serverClient.isOpen()) {
-        serverClient.send(`[TEXT_PROMPT]:${text}`);
+        serverClient.send(`[TYPED_PROMPT:${Date.now()}]:${text}`);
         chatTextInput.value = '';
         stopAudio();
     }
@@ -485,28 +540,28 @@ chatTextInput.onkeydown = (e) => { if (e.key === 'Enter') sendTypedMessage(); };
 function switchTab(activeBtn, activeView) {
     [homeTabBtn, threadTabBtn, memoryTabBtn].forEach(btn => btn?.classList.remove('active'));
     activeBtn?.classList.add('active');
-    
-    if(homeView) homeView.style.display = 'none';
-    if(transcript) {
+
+    if (homeView) homeView.style.display = 'none';
+    if (transcript) {
         transcript.style.display = 'none';
         textInputContainer.style.display = 'none';
     }
-    if(summaryView) summaryView.style.display = 'none';
-    
-    if(activeView) {
+    if (summaryView) summaryView.style.display = 'none';
+
+    if (activeView) {
         activeView.style.display = activeView === homeView ? 'flex' : 'block';
         if (activeView === transcript) {
             textInputContainer.style.display = 'flex';
-                if (threadsFab) threadsFab.style.bottom = '160px'; // Glide up to clear the text input
-            } else {
-                if (threadsFab) threadsFab.style.bottom = '100px'; // Drop back down to default resting position
+            if (threadsFab) threadsFab.style.bottom = '160px'; // Glide up to clear the text input
+        } else {
+            if (threadsFab) threadsFab.style.bottom = '100px'; // Drop back down to default resting position
         }
     }
 }
 
-if(homeTabBtn) homeTabBtn.onclick = () => switchTab(homeTabBtn, homeView);
-if(threadTabBtn) threadTabBtn.onclick = () => { switchTab(threadTabBtn, transcript); transcript.scrollTop = transcript.scrollHeight; };
-if(memoryTabBtn) memoryTabBtn.onclick = () => switchTab(memoryTabBtn, summaryView);
+if (homeTabBtn) homeTabBtn.onclick = () => switchTab(homeTabBtn, homeView);
+if (threadTabBtn) threadTabBtn.onclick = () => { switchTab(threadTabBtn, transcript); transcript.scrollTop = transcript.scrollHeight; };
+if (memoryTabBtn) memoryTabBtn.onclick = () => switchTab(memoryTabBtn, summaryView);
 
 async function requestWakeLock() {
     try {
@@ -563,12 +618,13 @@ function getSettingsObj() {
         userName: localStorage.getItem('speax_user_name') || '',
         googleName: localStorage.getItem('speax_google_name') || googleName,
         userBio: localStorage.getItem('speax_user_bio') || '',
-        provider: localStorage.getItem('speax_provider') || 'ollama', 
+        provider: localStorage.getItem('speax_provider') || 'ollama',
         apiKey: localStorage.getItem('speax_gemini_key') || '',
         model: localStorage.getItem('speax_model') || '',
         voice: localStorage.getItem('speax_voice') || '',
         clientStorage: memoryManager.isClientSide,
-        clientTts: useLocalTts
+        clientTts: useLocalTts,
+        passiveAssistant: passiveAssistant
     };
 }
 
@@ -577,7 +633,7 @@ function renderMemoryTab() {
     const data = lastSummaryData;
     const ctxPct = Math.min(100, (data.estTokens / data.maxTokens) * 100) || 0;
     const arcPct = Math.min(100, (data.archiveTurns / data.maxArchiveTurns) * 100) || 0;
-    
+
     let tokenHtml = '';
     const usageKeys = Object.keys(lastTokenUsage);
     if (usageKeys.length > 0) {
@@ -610,13 +666,13 @@ function renderMemoryTab() {
 function startNativeListening() {
     if (!recognition || !useNativeStt || isMuted || isPaused || !isDictationActive) return;
     if (!isRecognitionActive) {
-        try { recognition.start(); } catch (e) {}
+        try { recognition.start(); } catch (e) { }
     }
 }
 
 function stopNativeListening() {
     if (!recognition) return;
-    try { recognition.stop(); } catch (e) {}
+    try { recognition.stop(); } catch (e) { }
     clearTimeout(nativeSttDebounceTimer);
 }
 
@@ -635,14 +691,14 @@ serverClient = new ServerClient(
             pauseBtn.style.display = 'flex';
             pauseBtn.innerHTML = isPaused ? ICON_PLAY : ICON_PAUSE;
             pauseBtn.classList.toggle('pressed', isPaused);
-            reconnectDelay = 1000; 
+            reconnectDelay = 1000;
             requestWakeLock();
             if (useNativeStt) {
                 startNativeListening();
             } else {
-                if (!processor) startRecording(); 
+                if (!processor) startRecording();
             }
-            
+
             if (memoryManager.isClientSide) {
                 // Rehydrate empty server memory with our local reality
                 serverClient.sendRestoreClientThreads(memoryManager.getFullState());
@@ -656,7 +712,7 @@ serverClient = new ServerClient(
             stopNativeListening();
             flushNativeSttBuffer(); // Don't lose the final thought!
             releaseWakeLock();
-            
+
             if (isDictationActive) {
                 status.innerText = `Status: Reconnecting in ${reconnectDelay / 1000}s...`;
                 setTimeout(() => serverClient.connect(), reconnectDelay);
@@ -686,7 +742,7 @@ serverClient = new ServerClient(
                 lastTokenUsage = s.tokenUsage;
                 renderMemoryTab();
             }
-            if (s.provider) { 
+            if (s.provider) {
                 localStorage.setItem('speax_user_name', s.userName || '');
                 localStorage.setItem('speax_user_bio', s.userBio || '');
                 localStorage.setItem('speax_provider', s.provider);
@@ -694,16 +750,18 @@ serverClient = new ServerClient(
                 localStorage.setItem('speax_voice', s.voice || '');
                 localStorage.setItem('speax_client_storage', s.clientStorage ? 'true' : 'false');
                 localStorage.setItem('speax_google_name', s.googleName || '');
-                
+
                 userName.value = s.userName || '';
                 userBio.value = s.userBio || '';
                 aiProvider.value = s.provider;
                 storageMode.value = s.clientStorage ? 'client' : 'server';
                 useLocalTts = s.clientTts || false;
                 if (useLocalTtsToggle) useLocalTtsToggle.checked = useLocalTts;
+                passiveAssistant = s.passiveAssistant || false;
+                if (passiveAssistantToggle) passiveAssistantToggle.checked = passiveAssistant;
                 geminiSettings.style.display = s.provider === 'gemini' ? 'flex' : 'none';
                 memoryManager.setClientSide(s.clientStorage);
-                
+
                 loadModels().then(() => { if (s.model) aiModel.value = s.model; });
                 loadVoices().then(() => { if (s.voice) aiVoice.value = s.voice; });
             }
@@ -715,23 +773,23 @@ serverClient = new ServerClient(
             safeThreads.forEach(t => {
                 const btn = document.createElement('div');
                 btn.className = `thread-item ${t.id === data.activeId ? 'active' : ''}`;
-                
+
                 const nameSpan = document.createElement('span');
                 nameSpan.innerText = t.name;
                 nameSpan.style.flexGrow = '1';
                 nameSpan.onclick = () => {
-                    if(t.id !== data.activeId) serverClient.sendSwitchThread(t.id);
+                    if (t.id !== data.activeId) serverClient.sendSwitchThread(t.id);
                     closeDrawers();
                 };
-                
+
                 const delBtn = document.createElement('button');
                 delBtn.className = 'btn-del-circle';
                 delBtn.innerText = 'X';
                 delBtn.onclick = (e) => {
                     e.stopPropagation();
-                    if(confirm('Delete this thread?')) serverClient.sendDeleteThread(t.id);
+                    if (confirm('Delete this thread?')) serverClient.sendDeleteThread(t.id);
                 };
-                
+
                 btn.appendChild(nameSpan);
                 btn.appendChild(delBtn);
                 threadList.appendChild(btn);
@@ -744,11 +802,11 @@ serverClient = new ServerClient(
 
             transcript.innerHTML = '';
             const combined = [...(data.archive || []), ...(data.history || [])];
-            
+
             combined.forEach((msg, idx) => {
                 const msgDiv = document.createElement('div');
                 msgDiv.className = 'msg-row';
-                
+
                 let delBtn = null;
                 if (msg.role !== 'assistant' && msg.role !== 'system') {
                     delBtn = document.createElement('button');
@@ -763,12 +821,17 @@ serverClient = new ServerClient(
                         if (nextEl && nextEl.querySelector('span') && nextEl.querySelector('span').innerText.includes('Alyx:')) nextEl.remove();
                     };
                 }
-                
+
                 const contentSpan = document.createElement('span');
                 contentSpan.className = 'msg-content';
                 if (msg.role === 'assistant') {
                     contentSpan.classList.add('msg-assistant');
                     contentSpan.innerText = `Alyx: ${msg.content}`;
+                } else if (msg.role === 'system') {
+                    contentSpan.classList.add('msg-system');
+                    contentSpan.style.color = '#888';
+                    contentSpan.style.fontStyle = 'italic';
+                    contentSpan.innerText = `[System]: ${msg.content}`;
                 } else {
                     contentSpan.classList.add('msg-user');
                     const gNameMatch = document.cookie.match(/(?:^|; )speax_google_name=([^;]*)/);
@@ -776,12 +839,12 @@ serverClient = new ServerClient(
                     const uName = userName.value || gName;
                     contentSpan.innerText = `${uName}: ${msg.content}`;
                 }
-                
+
                 msgDiv.appendChild(contentSpan);
                 if (delBtn) msgDiv.appendChild(delBtn);
                 transcript.appendChild(msgDiv);
             });
-            
+
             if (wasAtBottom) transcript.scrollTop = transcript.scrollHeight;
             else transcript.scrollTop = prevScrollTop;
 
@@ -795,6 +858,63 @@ serverClient = new ServerClient(
                 summaryContent.innerText = data.text || "No summary generated yet.";
             }
             memoryManager.updateActiveMemory(undefined, undefined, data.text || "");
+        },
+        onToolUIEvent: (eventData) => {
+            const container = document.getElementById('toolToastContainer');
+            if (!container) return;
+
+            const { executionId, toolName, actionName, status: eventStatus, summary } = eventData;
+
+            // Look for existing toast for this executionId
+            let toast = document.getElementById(`tool-toast-${executionId}`);
+
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.id = `tool-toast-${executionId}`;
+                toast.style.padding = '8px 16px';
+                toast.style.borderRadius = '20px';
+                toast.style.background = 'var(--surface-high, #333)';
+                toast.style.color = 'var(--text-bright, #fff)';
+                toast.style.fontSize = '0.9em';
+                toast.style.boxShadow = '0 2px 8px rgba(0,0,0,0.3)';
+                toast.style.display = 'flex';
+                toast.style.alignItems = 'center';
+                toast.style.gap = '8px';
+                toast.style.transition = 'opacity 0.3s ease-out, transform 0.3s ease-out';
+                toast.innerHTML = `
+                    <div class="spinner" style="width: 14px; height: 14px; border: 2px solid rgba(0,209,193,0.3); border-top-color: #00D1C1; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                    <span>Using <b>${toolName}</b>...</span>
+                `;
+                container.appendChild(toast);
+
+                // Add spin animation dynamically if not present
+                if (!document.getElementById('spin-keyframes')) {
+                    const style = document.createElement('style');
+                    style.id = 'spin-keyframes';
+                    style.innerHTML = `@keyframes spin { to { transform: rotate(360deg); } }`;
+                    document.head.appendChild(style);
+                }
+            }
+
+            if (eventStatus === 'success' || eventStatus === 'error') {
+                // Update final state
+                const isError = eventStatus === 'error';
+                const icon = isError ? '❌' : '✅';
+                const color = isError ? '#ff4d4d' : '#00D1C1';
+
+                toast.style.background = isError ? 'var(--surface-error, #400)' : 'var(--surface-high, #333)';
+                toast.innerHTML = `
+                    <span style="color: ${color}; font-size: 1.1em;">${icon}</span>
+                    <span>${summary || (isError ? 'Tool failed' : 'Tool finished')}</span>
+                `;
+
+                // Remove after delay
+                setTimeout(() => {
+                    toast.style.opacity = '0';
+                    toast.style.transform = 'translateY(-10px)';
+                    setTimeout(() => toast.remove(), 300);
+                }, 4000);
+            }
         },
         onFullExportSync: (data) => {
             memoryManager.activeId = data.activeId;
@@ -823,7 +943,6 @@ serverClient = new ServerClient(
             transcript.scrollTop = transcript.scrollHeight;
         },
         onUserText: (text) => {
-            stopAudio(); 
             const msg = document.createElement('div');
             const gNameMatch = document.cookie.match(/(?:^|; )speax_google_name=([^;]*)/);
             const gName = localStorage.getItem('speax_google_name') || (gNameMatch ? decodeURIComponent(gNameMatch[1]) : 'User');
@@ -855,6 +974,19 @@ muteBtn.onclick = () => {
         muteBtn.style.boxShadow = 'none';
         if (useNativeStt) stopNativeListening();
         flushNativeSttBuffer();
+        if (isSpeaking && !useNativeStt) {
+            isSpeaking = false;
+            silenceFrames = 0;
+            if (isStreaming) {
+                status.innerText = "Status: Processing with Whisper...";
+                endStreamingSession();
+            } else if (audioChunks.length >= MIN_CHUNKS) {
+                status.innerText = "Status: Processing with Whisper...";
+                sendAndClearBuffer();
+            } else {
+                audioChunks = [];
+            }
+        }
         if (!isPlayingAudio && serverClient.isOpen()) status.innerText = "Status: Connected - Muted";
     } else {
         muteBtn.innerHTML = ICON_MIC;
@@ -912,7 +1044,11 @@ pauseBtn.onclick = () => {
         if (!isMuted) muteBtn.click(); // Mute mic
         if (useNativeStt) stopNativeListening();
         flushNativeSttBuffer(); // Force send any pending thoughts
-        if (audioChunks.length > 0) sendAndClearBuffer(); // Flush any pending audio
+        if (isStreaming) {
+            endStreamingSession();
+        } else if (audioChunks.length > 0) {
+            sendAndClearBuffer(); // Flush any pending audio
+        }
         localTtsQueue = []; // Clear pending TTS chunks
         status.innerText = "Status: Paused";
     } else {
@@ -929,15 +1065,18 @@ pauseBtn.onclick = () => {
 
 async function playNextAudio() {
     if (audioQueue.length === 0 || isPaused) {
+        if (isPlayingAudio && !isPaused && speaxWebSocket && speaxWebSocket.readyState === WebSocket.OPEN) {
+            speaxWebSocket.send("[PLAYBACK_COMPLETE]");
+        }
         isPlayingAudio = false;
         progressBar.style.width = '0%';
         status.innerText = isMuted ? "Status: Connected - Muted" : "Status: Connected - Listening...";
         return;
     }
-    
+
     isPlayingAudio = true;
     status.innerText = "Status: Playing Audio...";
-    
+
     if (!outContext) outContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     if (outContext.state === 'suspended') await outContext.resume();
 
@@ -946,7 +1085,7 @@ async function playNextAudio() {
         const estSecs = Math.max(0, blob.size - 44) / 32000;
         const arrayBuffer = await blob.arrayBuffer();
         const audioBuffer = await outContext.decodeAudioData(arrayBuffer);
-        
+
         // Correct our rough estimate with the precise decoded duration
         console.log(`[Audio Play] Decoded exact duration: ${audioBuffer.duration.toFixed(2)}s (Estimate was ${estSecs.toFixed(2)}s).`);
         aiAudioTotalSecs = aiAudioTotalSecs - estSecs + audioBuffer.duration;
@@ -956,7 +1095,7 @@ async function playNextAudio() {
             audioAnalyser.fftSize = 256;
             audioAnalyser.connect(outContext.destination);
         }
-        
+
         const source = outContext.createBufferSource();
         currentAudioSource = source;
         source.buffer = audioBuffer;
@@ -967,11 +1106,11 @@ async function playNextAudio() {
             playNextAudio();
         }; // trigger the next chunk gaplessly!
         source.start(0);
-        
+
         aiChunkStartContextTime = outContext.currentTime;
         aiChunkDuration = audioBuffer.duration;
         if (!progressAnimId) updateProgressBar();
-        
+
         if (!visualizerId) renderVisualizer();
     } catch (err) {
         console.error("Error decoding TTS audio:", err);
@@ -984,27 +1123,27 @@ function updateProgressBar() {
         progressAnimId = null;
         return;
     }
-    
+
     progressBar.style.transition = 'none'; // Prevent CSS fighting requestAnimationFrame
-    
+
     let currentChunkProgress = outContext.currentTime - aiChunkStartContextTime;
     if (currentChunkProgress < 0) currentChunkProgress = 0;
     if (currentChunkProgress > aiChunkDuration) currentChunkProgress = aiChunkDuration;
-    
+
     let totalPlayed = aiAudioPlayedSecs + currentChunkProgress;
-        let targetPercent = aiAudioTotalSecs > 0 ? 100 - ((totalPlayed / aiAudioTotalSecs) * 100) : 0;
-        if (targetPercent < 0) targetPercent = 0;
-        if (targetPercent > 100) targetPercent = 100;
-        
-        // Lerp magic: Move visual percent 10% of the way to the target percent every frame
-        currentVisualPercent += (targetPercent - currentVisualPercent) * 0.1;
-    
+    let targetPercent = aiAudioTotalSecs > 0 ? 100 - ((totalPlayed / aiAudioTotalSecs) * 100) : 0;
+    if (targetPercent < 0) targetPercent = 0;
+    if (targetPercent > 100) targetPercent = 100;
+
+    // Lerp magic: Move visual percent 10% of the way to the target percent every frame
+    currentVisualPercent += (targetPercent - currentVisualPercent) * 0.1;
+
     // if (progressLogThrottler++ % 15 === 0) {
     //         console.log(`[Progress UI] Target: ${targetPercent.toFixed(1)}% | Visual: ${currentVisualPercent.toFixed(1)}%`);
     // }
 
-        progressBar.style.width = `${currentVisualPercent}%`;
-    
+    progressBar.style.width = `${currentVisualPercent}%`;
+
     progressAnimId = requestAnimationFrame(updateProgressBar);
 }
 
@@ -1015,21 +1154,21 @@ function renderInputVisualizer() {
         inputVisualizerId = null;
         return;
     }
-    
+
     const dataArray = new Uint8Array(inputAnalyser.frequencyBinCount);
     inputAnalyser.getByteFrequencyData(dataArray);
-    
+
     let sum = 0;
     for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
     const avg = sum / dataArray.length; // 0 to 255
-    
+
     const scale = 1 + (avg / 255) * 0.15;
     const shadow = (avg / 255) * 40;
-    
+
     muteBtn.style.transform = `scale(${scale})`;
     // Pulse Blue for User Input (14, 99, 156 is the RGB for #0E639C)
-    muteBtn.style.boxShadow = `0 0 ${shadow}px ${shadow/2}px rgba(14, 99, 156, 0.8)`;
-    
+    muteBtn.style.boxShadow = `0 0 ${shadow}px ${shadow / 2}px rgba(14, 99, 156, 0.8)`;
+
     inputVisualizerId = requestAnimationFrame(renderInputVisualizer);
 }
 
@@ -1040,21 +1179,21 @@ function renderVisualizer() {
         mainToggleBtn.style.boxShadow = 'none';
         return;
     }
-    
+
     const dataArray = new Uint8Array(audioAnalyser.frequencyBinCount);
     audioAnalyser.getByteFrequencyData(dataArray);
-    
+
     let sum = 0;
     for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
     const avg = sum / dataArray.length; // 0 to 255
-    
+
     // Map amplitude to scale (1 to 1.15) and glow size
     const scale = 1 + (avg / 255) * 0.15;
     const shadow = (avg / 255) * 60;
-    
+
     mainToggleBtn.style.transform = `scale(${scale})`;
-    mainToggleBtn.style.boxShadow = `0 0 ${shadow}px ${shadow/2}px rgba(0, 209, 193, 0.8)`;
-    
+    mainToggleBtn.style.boxShadow = `0 0 ${shadow}px ${shadow / 2}px rgba(0, 209, 193, 0.8)`;
+
     visualizerId = requestAnimationFrame(renderVisualizer);
 }
 
@@ -1063,7 +1202,7 @@ function stopAudio() {
     window.speechSynthesis.cancel(); // Kill native Web Speech API if it's running
     if (currentAudioSource) {
         currentAudioSource.onended = null; // Prevent race condition injecting time into the next AI generation!
-        try { currentAudioSource.stop(); } catch (e) {}
+        try { currentAudioSource.stop(); } catch (e) { }
         currentAudioSource = null;
     }
     isPlayingAudio = false;
@@ -1078,27 +1217,100 @@ function stopAudio() {
     }
 }
 
+let duckingNode = null;
+let duckingInterval = null;
+
+function manageDuckingState() {
+    if (!duckingNode || !inContext) return;
+    const isAiActive = (currentAiDiv !== null || isPlayingAudio || window.speechSynthesis.speaking);
+    const now = inContext.currentTime;
+
+    const duckingActive = duckingNode.duckingActive || false;
+
+    let targetGain = 0.1;
+    if (currentMicProfile === 'mute_playback') {
+        targetGain = 0.0;
+    } else if (currentMicProfile === 'adaptive') {
+        // Scale Ducking Gain proportionally:
+        // Normal baseline (0.05) -> 0.1 target
+        // Quiet User (0.01) -> 0.02 target (Heavier Ducking)
+        // Loud User (0.1) -> 0.2 target (Lighter Ducking)
+        targetGain = Math.max(0.01, Math.min(0.5, (averageSpeechRms / 0.05) * 0.1));
+    }
+
+    if (isAiActive && !duckingActive) {
+        duckingNode.duckingActive = true;
+        duckingNode.gain.cancelScheduledValues(now);
+        duckingNode.gain.setTargetAtTime(targetGain, now, 0.05); // Smooth transition down
+    } else if (!isAiActive && duckingActive) {
+        duckingNode.duckingActive = false;
+        duckingNode.gain.cancelScheduledValues(now);
+        duckingNode.gain.setTargetAtTime(1.0, now, 0.05); // Smooth transition up
+    } else if (isAiActive && duckingActive) {
+        // Handle case where profile was changed mid-playback or adaptive adjusted
+        duckingNode.gain.setTargetAtTime(targetGain, now, 0.05);
+    }
+}
+
 async function startRecording() {
     inContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-    
+
     if (inContext.state === 'suspended') {
         await inContext.resume();
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    let constraints = { audio: true };
+    if (currentMicProfile === 'heavy') {
+        constraints = {
+            audio: {
+                noiseSuppression: true,
+                echoCancellation: true,
+                autoGainControl: true
+            }
+        };
+    } else if (currentMicProfile === 'sensitive') {
+        constraints = {
+            audio: {
+                noiseSuppression: false,
+                echoCancellation: false,
+                autoGainControl: false
+            }
+        };
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
     input = inContext.createMediaStreamSource(stream);
-    
+
+    duckingNode = inContext.createGain();
+    duckingNode.gain.value = 1.0;
+    duckingNode.duckingActive = false;
+    if (!duckingInterval) duckingInterval = setInterval(manageDuckingState, 100);
+
+    let filterNode = null;
+    if (currentMicProfile === 'heavy') {
+        const filter = inContext.createBiquadFilter();
+        filter.type = 'highpass';
+        filter.frequency.value = 100;
+        input.connect(filter);
+        filter.connect(duckingNode);
+    } else {
+        input.connect(duckingNode);
+    }
+
     // Using ScriptProcessor for simplicity in this MVP; AudioWorklet is preferred for production
     processor = inContext.createScriptProcessor(4096, 1, 1);
-    
+
     inputAnalyser = inContext.createAnalyser();
     inputAnalyser.fftSize = 256;
-    input.connect(inputAnalyser);
+
+    duckingNode.connect(inputAnalyser);
+    duckingNode.connect(processor);
+
     if (!inputVisualizerId) renderInputVisualizer();
 
     processor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
-        
+
         // Calculate volume (RMS)
         let sum = 0;
         for (let i = 0; i < inputData.length; i++) {
@@ -1106,14 +1318,19 @@ async function startRecording() {
         }
         const rms = isMuted ? 0 : Math.sqrt(sum / inputData.length);
 
-        if (rms > NOISE_THRESHOLD) {
+        let currentThreshold = currentMicProfile === 'adaptive' ? Math.max(0.005, averageSpeechRms * 0.3) : NOISE_THRESHOLD;
+        if (currentMicProfile === 'sensitive') currentThreshold = 0.005; // Lower threshold = more sensitive
+
+        if (rms > currentThreshold) {
             // Speech detected
             if (!isSpeaking) {
                 if (outContext && outContext.state === 'running') {
-                    outContext.suspend(); // PAUSE audio, don't destroy it yet
+                    stopAudio(); // completely abort playback to prevent deadlock
                 }
+                startStreamingSession();
                 status.innerText = "Status: Recording (Speaking)...";
                 isSpeaking = true;
+                speechStartTime = Date.now();
                 // Prepend the pre-roll buffer to catch the very start of the word
                 audioChunks = [...preRollBuffer];
             }
@@ -1123,13 +1340,16 @@ async function startRecording() {
             // Silence detected during a recording
             audioChunks.push(new Float32Array(inputData)); // keep trailing silence
             silenceFrames++;
-            
+
             if (silenceFrames >= SILENCE_FRAMES_LIMIT) {
                 // We are done speaking
                 isSpeaking = false;
                 silenceFrames = 0;
-                
-                if (audioChunks.length >= MIN_CHUNKS) {
+
+                if (isStreaming) {
+                    status.innerText = "Status: Processing with Whisper...";
+                    endStreamingSession(); // Always end the session if we started streaming
+                } else if (audioChunks.length >= MIN_CHUNKS) {
                     status.innerText = "Status: Processing with Whisper...";
                     sendAndClearBuffer();
                 } else {
@@ -1147,8 +1367,62 @@ async function startRecording() {
         }
     };
 
-    input.connect(processor);
+    // ScriptProcessor MUST be connected to destination to fire events!
     processor.connect(inContext.destination);
+}
+
+function startStreamingSession() {
+    isStreaming = true;
+    currentSeqID = BigInt(Date.now());
+    if (streamingInterval) clearInterval(streamingInterval);
+    streamingInterval = setInterval(() => {
+        if (isStreaming && audioChunks.length > 0) {
+            sendStreamingChunk(0x01); // 0x01 = STREAM
+        }
+    }, STREAMING_INTERVAL_MS);
+}
+
+function endStreamingSession() {
+    if (streamingInterval) {
+        clearInterval(streamingInterval);
+        streamingInterval = null;
+    }
+    if (isStreaming) {
+        // Force-send any remaining data immediately
+        sendStreamingChunk(0x02);
+        isStreaming = false;
+    }
+}
+
+function sendStreamingChunk(packetType) {
+    if (!serverClient.isOpen()) return;
+
+    // Atomically swap the buffer
+    const activeData = audioChunks;
+    audioChunks = [];
+
+    if (activeData.length === 0 && packetType === 0x01) return;
+
+    const totalSamples = activeData.reduce((acc, val) => acc + val.length, 0);
+    const pcmData = new Int16Array(totalSamples);
+
+    let offset = 0;
+    for (const chunk of activeData) {
+        for (let i = 0; i < chunk.length; i++) {
+            pcmData[offset++] = Math.max(-1, Math.min(1, chunk[i])) * 32767;
+        }
+    }
+
+    // Envelope: [0xFF][TYPE][SEQ_ID (8 bytes)][DATA]
+    const packet = new Uint8Array(10 + pcmData.byteLength);
+    const view = new DataView(packet.buffer);
+    packet[0] = 0xFF;
+    packet[1] = packetType;
+    view.setBigUint64(2, currentSeqID);
+    packet.set(new Uint8Array(pcmData.buffer), 10);
+
+    serverClient.send(packet.buffer);
+    audioChunks = [];
 }
 
 function sendAndClearBuffer() {
@@ -1156,21 +1430,44 @@ function sendAndClearBuffer() {
         audioChunks = []; // Don't hoard memory if socket is dead
         return;
     }
-    
+
     const totalLength = audioChunks.reduce((acc, val) => acc + val.length, 0);
     const pcmData = new Int16Array(totalLength);
     let offset = 0;
+    let sumSquares = 0;
+
     for (const chunk of audioChunks) {
         for (let i = 0; i < chunk.length; i++) {
+            sumSquares += chunk[i] * chunk[i];
             pcmData[offset++] = Math.max(-1, Math.min(1, chunk[i])) * 0x7FFF;
         }
     }
-    
-    serverClient.send(pcmData.buffer);
+
+    // Apply Exponential Moving Average (EMA) to baseline for adaptive profile
+    if (totalLength > 0) {
+        const chunkRms = Math.sqrt(sumSquares / totalLength);
+        averageSpeechRms = (0.8 * averageSpeechRms) + (0.2 * chunkRms);
+    }
+
+    // Prepend 8-byte BigEndian timestamp (milliseconds)
+    const finalBuffer = new Uint8Array(8 + pcmData.byteLength);
+    const view = new DataView(finalBuffer.buffer);
+    view.setBigUint64(0, BigInt(speechStartTime));
+    finalBuffer.set(new Uint8Array(pcmData.buffer), 8);
+
+    serverClient.send(finalBuffer.buffer);
     audioChunks = [];
 }
 
 function stopRecording() {
+    if (duckingInterval) {
+        clearInterval(duckingInterval);
+        duckingInterval = null;
+    }
+    if (duckingNode) {
+        duckingNode.disconnect();
+        duckingNode = null;
+    }
     if (input && input.mediaStream) {
         input.mediaStream.getTracks().forEach(track => track.stop());
     }
@@ -1186,4 +1483,10 @@ function stopRecording() {
         inContext.close();
         inContext = null;
     }
+    // Cleanup streaming state
+    if (streamingInterval) {
+        clearInterval(streamingInterval);
+        streamingInterval = null;
+    }
+    isStreaming = false;
 }

@@ -18,7 +18,7 @@
 		android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
         android:usesCleartextTraffic="true"> <!-- Needed if talking to local http/ws -->
-
+        
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -34,9 +34,19 @@
                 <data android:scheme="speax" android:host="callback" />
             </intent-filter>
         </activity>
+        
         <service
 		    android:name=".SpeaxService"
 		    android:foregroundServiceType="microphone"
 		    android:exported="false" />
+		
+		<receiver 
+		    android:name=".MediaButtonReceiver" 
+		    android:exported="true">
+		    <intent-filter android:priority="999">
+		        <action android:name="android.intent.action.MEDIA_BUTTON" />
+		    </intent-filter>
+		</receiver>
+		
     </application>
 </manifest>

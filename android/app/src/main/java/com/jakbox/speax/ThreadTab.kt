@@ -23,6 +23,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
 
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.clickable
+
 @Composable
 fun ThreadTab(mainActivity: MainActivity, listState: LazyListState) {
     var inputText by remember { mutableStateOf("") }
@@ -34,7 +37,13 @@ fun ThreadTab(mainActivity: MainActivity, listState: LazyListState) {
             contentPadding = PaddingValues(vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            itemsIndexed(mainActivity.messages) { index, msg -> MessageBubble(msg, index, mainActivity) }
+            itemsIndexed(mainActivity.messages) { index, msg ->
+                // Calculate if this message is among the most recent 5 of its role
+                val sameRoleMessages = mainActivity.messages.filterIndexed { i, m -> m.role == msg.role && i >= index }
+                val isRecent = sameRoleMessages.size <= 5
+
+                MessageBubble(msg, index, isRecent, mainActivity)
+            }
         }
 
         // Text Input Row
@@ -56,7 +65,7 @@ fun ThreadTab(mainActivity: MainActivity, listState: LazyListState) {
             TextButton(
                 onClick = {
                     if (inputText.isNotBlank()) {
-                        mainActivity.sendTextPrompt(inputText)
+                        mainActivity.sendTypedPrompt(inputText)
                         inputText = ""
                     }
                 },
@@ -70,9 +79,12 @@ fun ThreadTab(mainActivity: MainActivity, listState: LazyListState) {
 }
 
 @Composable
-fun MessageBubble(msg: UiMessage, index: Int, mainActivity: MainActivity) {
+fun MessageBubble(msg: UiMessage, index: Int, isRecent: Boolean, mainActivity: MainActivity) {
     val isAi = msg.role == "assistant"
     val isSystem = msg.role == "system"
+    var userExpanded by remember(msg, index) { mutableStateOf(false) }
+
+    val shouldExpand = if (isSystem) userExpanded else (isRecent || userExpanded)
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -80,14 +92,34 @@ fun MessageBubble(msg: UiMessage, index: Int, mainActivity: MainActivity) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         // The raw text row
-        Row(modifier = Modifier.weight(1f)) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .clickable { userExpanded = !userExpanded }
+        ) {
             Text(
-                text = if (isAi) "Alyx: ${msg.content}" else if (!isSystem) "User: ${msg.content}" else msg.content,
+                text = if (isAi) "Alyx: ${msg.content}" else if (!isSystem) "User: ${msg.content}" else "[System]: ${msg.content}",
                 color = if (isSystem) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f) else if (isAi) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 fontSize = if (isSystem) 12.sp else 16.sp,
                 fontWeight = if (isAi) FontWeight.Bold else FontWeight.Normal,
-                fontStyle = if (isSystem) androidx.compose.ui.text.font.FontStyle.Italic else androidx.compose.ui.text.font.FontStyle.Normal
+                fontStyle = if (isSystem) androidx.compose.ui.text.font.FontStyle.Italic else androidx.compose.ui.text.font.FontStyle.Normal,
+                maxLines = if (shouldExpand) Int.MAX_VALUE else 1,
+                overflow = TextOverflow.Ellipsis
             )
+        }
+
+        if (isSystem) {
+            TextButton(
+                onClick = { userExpanded = !userExpanded },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                modifier = Modifier.height(24.dp)
+            ) {
+                Text(
+                    text = if (userExpanded) "Collapse" else "Expand",
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
         }
 
         // Minimal Delete Button (Only on User turns, sits to the far right)

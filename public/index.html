@@ -1,22 +1,35 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Speax Client</title>
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg viewBox='0 0 100 100' xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='100' height='100' fill='%231A1C2C' rx='20'/%3E%3Cg%3E%3Cg fill='rgba(74, 78, 105, 0.35)'%3E%3Crect x='14' y='42.65' width='8' height='8.36' rx='4' /%3E%3Crect x='26' y='27.60' width='8' height='28.35' rx='4' /%3E%3Crect x='38' y='17.33' width='8' height='54.05' rx='4' /%3E%3Crect x='50' y='22.74' width='8' height='67.76' rx='4' /%3E%3Crect x='62' y='40.14' width='8' height='45.75' rx='4' /%3E%3Crect x='74' y='47.46' width='8' height='21.13' rx='4' /%3E%3Crect x='86' y='48.02' width='8' height='6.40' rx='4' /%3E%3C/g%3E%3Cg fill='%2300D1C1'%3E%3Crect x='10' y='45.00' width='8' height='13.37' rx='4' /%3E%3Crect x='22' y='44.67' width='8' height='27.57' rx='4' /%3E%3Crect x='34' y='45.99' width='8' height='32.26' rx='4' /%3E%3Crect x='46' y='38.51' width='8' height='31.38' rx='4' /%3E%3Crect x='58' y='29.07' width='8' height='26.99' rx='4' /%3E%3Crect x='70' y='29.93' width='8' height='22.98' rx='4' /%3E%3Crect x='82' y='41.02' width='8' height='12.13' rx='4' /%3E%3C/g%3E%3C/g%3E%3C/svg%3E">
-    <link rel="stylesheet" href="styles.css?2">
+    <link rel="icon" type="image/svg+xml"
+        href="data:image/svg+xml,%3Csvg viewBox='0 0 100 100' xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='100' height='100' fill='%231A1C2C' rx='20'/%3E%3Cg%3E%3Cg fill='rgba(74, 78, 105, 0.35)'%3E%3Crect x='14' y='42.65' width='8' height='8.36' rx='4' /%3E%3Crect x='26' y='27.60' width='8' height='28.35' rx='4' /%3E%3Crect x='38' y='17.33' width='8' height='54.05' rx='4' /%3E%3Crect x='50' y='22.74' width='8' height='67.76' rx='4' /%3E%3Crect x='62' y='40.14' width='8' height='45.75' rx='4' /%3E%3Crect x='74' y='47.46' width='8' height='21.13' rx='4' /%3E%3Crect x='86' y='48.02' width='8' height='6.40' rx='4' /%3E%3C/g%3E%3Cg fill='%2300D1C1'%3E%3Crect x='10' y='45.00' width='8' height='13.37' rx='4' /%3E%3Crect x='22' y='44.67' width='8' height='27.57' rx='4' /%3E%3Crect x='34' y='45.99' width='8' height='32.26' rx='4' /%3E%3Crect x='46' y='38.51' width='8' height='31.38' rx='4' /%3E%3Crect x='58' y='29.07' width='8' height='26.99' rx='4' /%3E%3Crect x='70' y='29.93' width='8' height='22.98' rx='4' /%3E%3Crect x='82' y='41.02' width='8' height='12.13' rx='4' /%3E%3C/g%3E%3C/g%3E%3C/svg%3E">
+    <link rel="stylesheet" href="styles.css?3">
 </head>
+
 <body>
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; width: 100%;">
         <div style="display: flex; align-items: center; width: 70%; gap: 10px;">
-            <button id="menuSettingsBtn" style="background: transparent; border: none; color: var(--text-bright); cursor: pointer; padding: 0; display: flex; align-items: center; justify-content: center;">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 28px; height: 28px;"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+            <button id="menuSettingsBtn"
+                style="background: transparent; border: none; color: var(--text-bright); cursor: pointer; padding: 0; display: flex; align-items: center; justify-content: center;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round" style="width: 28px; height: 28px;">
+                    <line x1="3" y1="12" x2="21" y2="12"></line>
+                    <line x1="3" y1="6" x2="21" y2="6"></line>
+                    <line x1="3" y1="18" x2="21" y2="18"></line>
+                </svg>
             </button>
-            <h1 style="margin: 0;">Speax</h1><span style="color: var(--slate-high);">|</span><input id="threadNameInput" type="text" style="background:transparent; border:none; color:var(--text-bright); font-size:1.1em; cursor:pointer; width: 100%;" title="Rename Thread" value="General Chat" />
+            <h1 style="margin: 0;">Speax</h1><span style="color: var(--slate-high);">|</span><input id="threadNameInput"
+                type="text"
+                style="background:transparent; border:none; color:var(--text-bright); font-size:1.1em; cursor:pointer; width: 100%;"
+                title="Rename Thread" value="General Chat" />
         </div>
         <div id="userProfileContainer" style="display: none; position: relative;">
-            <img id="userAvatarBtn" src="" alt="User" style="width: 40px; height: 40px; border-radius: 50%; border: 2px solid var(--slate-high); object-fit: cover;">
+            <img id="userAvatarBtn" src="" alt="User"
+                style="width: 40px; height: 40px; border-radius: 50%; border: 2px solid var(--slate-high); object-fit: cover;">
         </div>
     </div>
 
@@ -26,8 +39,9 @@
     </div>
 
     <div id="app-section" style="display: none; flex-grow: 1; flex-direction: column; min-height: 0;">
-        <div id="status" style="margin-bottom: 15px; font-weight: bold; font-size: 1.1em; color: var(--text-bright);">Status: Disconnected</div>
-        
+        <div id="status" style="margin-bottom: 15px; font-weight: bold; font-size: 1.1em; color: var(--text-bright);">
+            Status: Disconnected</div>
+
         <!-- Dynamic Audio Progress Bar (Global) -->
         <div id="audioProgressContainer" class="progress-container">
             <div id="audioProgressBar" class="progress-bar"></div>
@@ -36,24 +50,32 @@
         <div id="view-container" style="flex-grow: 1; display: flex; flex-direction: column; overflow: hidden;">
             <!-- Home View -->
             <div id="view-home" class="chat-view centered">
-                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 30px; margin: auto;">
+                <div
+                    style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 30px; margin: auto;">
                     <div style="position: relative; display: flex; justify-content: center; align-items: center;">
                         <!-- Main Toggle Button -->
                         <button id="mainToggleBtn" class="main-toggle-btn disconnected">
-                            <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="width: 50%; height: 50%;">
+                            <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"
+                                style="width: 50%; height: 50%;">
                                 <g fill="currentColor">
                                     <!-- Shadow / Thought Layer -->
                                     <g style="opacity: 0.35;">
-                                        <rect x="14" y="42.65" width="8" height="8.36" rx="4" /><rect x="26" y="27.60" width="8" height="28.35" rx="4" />
-                                        <rect x="38" y="17.33" width="8" height="54.05" rx="4" /><rect x="50" y="22.74" width="8" height="67.76" rx="4" />
-                                        <rect x="62" y="40.14" width="8" height="45.75" rx="4" /><rect x="74" y="47.46" width="8" height="21.13" rx="4" />
+                                        <rect x="14" y="42.65" width="8" height="8.36" rx="4" />
+                                        <rect x="26" y="27.60" width="8" height="28.35" rx="4" />
+                                        <rect x="38" y="17.33" width="8" height="54.05" rx="4" />
+                                        <rect x="50" y="22.74" width="8" height="67.76" rx="4" />
+                                        <rect x="62" y="40.14" width="8" height="45.75" rx="4" />
+                                        <rect x="74" y="47.46" width="8" height="21.13" rx="4" />
                                         <rect x="86" y="48.02" width="8" height="6.40" rx="4" />
                                     </g>
                                     <!-- Active / Speech Layer -->
                                     <g>
-                                        <rect x="10" y="45.00" width="8" height="13.37" rx="4" /><rect x="22" y="44.67" width="8" height="27.57" rx="4" />
-                                        <rect x="34" y="45.99" width="8" height="32.26" rx="4" /><rect x="46" y="38.51" width="8" height="31.38" rx="4" />
-                                        <rect x="58" y="29.07" width="8" height="26.99" rx="4" /><rect x="70" y="29.93" width="8" height="22.98" rx="4" />
+                                        <rect x="10" y="45.00" width="8" height="13.37" rx="4" />
+                                        <rect x="22" y="44.67" width="8" height="27.57" rx="4" />
+                                        <rect x="34" y="45.99" width="8" height="32.26" rx="4" />
+                                        <rect x="46" y="38.51" width="8" height="31.38" rx="4" />
+                                        <rect x="58" y="29.07" width="8" height="26.99" rx="4" />
+                                        <rect x="70" y="29.93" width="8" height="22.98" rx="4" />
                                         <rect x="82" y="41.02" width="8" height="12.13" rx="4" />
                                     </g>
                                 </g>
@@ -61,12 +83,21 @@
                         </button>
                         <!-- Floating Mute Button -->
                         <button id="muteBtn" class="satellite-btn mute" style="display: none;">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;">
+                                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                <line x1="12" y1="19" x2="12" y2="22"></line>
+                            </svg>
                         </button>
                     </div>
                     <!-- Pause Button -->
                     <button id="pauseBtn" class="satellite-btn pause" style="display: none;">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;">
+                            <rect x="6" y="4" width="4" height="16"></rect>
+                            <rect x="14" y="4" width="4" height="16"></rect>
+                        </svg>
                     </button>
                 </div>
             </div>
@@ -77,7 +108,8 @@
             <!-- Memory View -->
             <div id="summary-view" class="chat-view" style="display: none; flex-direction: column;">
                 <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-shrink: 0; width: 100%;">
-                    <button id="rebuildSummaryBtn" class="btn-primary" style="flex: 1; margin: 0;">Rebuild Summary</button>
+                    <button id="rebuildSummaryBtn" class="btn-primary" style="flex: 1; margin: 0;">Rebuild
+                        Summary</button>
                     <button id="clearHistoryBtn" class="btn-danger" style="flex: 1; margin: 0;">Expunge Memory</button>
                 </div>
                 <div id="summary-content" style="flex-grow: 1;">No summary generated yet.</div>
@@ -87,23 +119,44 @@
         <!-- Bottom Navigation Tabs -->
         <div id="bottom-tabs" class="tab-container">
             <button id="tab-home" class="tab-btn active">
-                <svg class="tab-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+                <svg class="tab-icon" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z" />
+                </svg>
                 <span>Home</span>
             </button>
             <button id="tab-thread" class="tab-btn">
-                <svg class="tab-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
+                <svg class="tab-icon" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z" />
+                </svg>
                 <span>Thread</span>
             </button>
             <button id="tab-memory" class="tab-btn">
-                <svg class="tab-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M15 9H9v6h6V9zm-2 4h-2v-2h2v2zm8-2V9h-2V7c0-1.1-.9-2-2-2h-2V3h-2v2h-2V3H9v2H7c-1.1 0-2 .9-2 2v2H3v2h2v2H3v2h2v2c0 1.1.9 2 2 2h2v2h2v-2h2v2h2v-2h2c1.1 0 2-.9 2-2v-2h2v-2h-2v-2h2zm-4 6H7V7h10v10z"/></svg>
+                <svg class="tab-icon" viewBox="0 0 24 24" fill="currentColor">
+                    <path
+                        d="M15 9H9v6h6V9zm-2 4h-2v-2h2v2zm8-2V9h-2V7c0-1.1-.9-2-2-2h-2V3h-2v2h-2V3H9v2H7c-1.1 0-2 .9-2 2v2H3v2h2v2H3v2h2v2c0 1.1.9 2 2 2h2v2h2v-2h2v2h2v-2h2c1.1 0 2-.9 2-2v-2h2v-2h-2v-2h2zm-4 6H7V7h10v10z" />
+                </svg>
                 <span>Memory</span>
             </button>
         </div>
     </div>
 
-    <button id="threadsFab" style="position: fixed; bottom: 85px; right: 20px; border-radius: 50%; width: 50px; height: 50px; display: none; z-index: 90; background: var(--slate-high); border: 1px solid var(--slate-mid); cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3); padding: 0; align-items: center; justify-content: center; color: var(--text-bright);">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+    <button id="threadsFab"
+        style="position: fixed; bottom: 85px; right: 20px; border-radius: 50%; width: 50px; height: 50px; display: none; z-index: 90; background: var(--slate-high); border: 1px solid var(--slate-mid); cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3); padding: 0; align-items: center; justify-content: center; color: var(--text-bright);">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            stroke-linejoin="round" style="width: 50%; height: 50%;">
+            <line x1="8" y1="6" x2="21" y2="6"></line>
+            <line x1="8" y1="12" x2="21" y2="12"></line>
+            <line x1="8" y1="18" x2="21" y2="18"></line>
+            <line x1="3" y1="6" x2="3.01" y2="6"></line>
+            <line x1="3" y1="12" x2="3.01" y2="12"></line>
+            <line x1="3" y1="18" x2="3.01" y2="18"></line>
+        </svg>
     </button>
+
+    <!-- Tool UI Events Toast Container -->
+    <div id="toolToastContainer"
+        style="position: fixed; top: 20px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 100; pointer-events: none;">
+    </div>
 
     <div id="drawerOverlay" class="drawer-overlay"></div>
 
@@ -113,7 +166,8 @@
             <button id="closeThreadsBtn" class="btn-close">✕</button>
         </div>
         <button id="newThreadBtn" class="btn-primary" style="margin: 0;">+ New Thread</button>
-        <div id="threadList" style="flex-grow: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 5px;"></div>
+        <div id="threadList" style="flex-grow: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 5px;">
+        </div>
     </div>
 
     <div id="settingsSidebar" class="sidebar" style="left: -320px; border-right: 1px solid var(--slate-high);">
@@ -121,12 +175,13 @@
             <h2>Settings</h2>
             <button id="closeSettingsBtn" class="btn-close">✕</button>
         </div>
-        
+
         <label style="margin-top: 10px;">Your Name:</label>
         <input type="text" id="userName" placeholder="e.g. Alex">
-        
+
         <label>Short Bio (Max 500 chars):</label>
-        <textarea id="userBio" maxlength="500" placeholder="e.g. I prefer concise code in Go and Vanilla JS." style="resize: vertical; min-height: 60px;"></textarea>
+        <textarea id="userBio" maxlength="500" placeholder="e.g. I prefer concise code in Go and Vanilla JS."
+            style="resize: vertical; min-height: 60px;"></textarea>
 
         <div id="nativeSttContainer" style="display: none; flex-direction: column; gap: 5px; margin-top: 15px;">
             <label style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;">
@@ -140,34 +195,35 @@
             <option value="ollama">Local (Ollama)</option>
             <option value="gemini">Google Gemini</option>
         </select>
-        
+
         <div id="geminiSettings" style="display: none; flex-direction: column; gap: 5px;">
             <label>Gemini API Key:</label>
             <input type="password" id="geminiApiKey" placeholder="AIzaSy...">
         </div>
-        
-    <div id="modelSettings" style="display: flex; flex-direction: column; gap: 5px; margin-top: 5px;">
-        <label>Model:</label>
-        <select id="aiModel"></select>
-    </div>
-    
-    <div id="voiceSettings" style="display: flex; flex-direction: column; gap: 5px; margin-top: 5px;">
-        <label>Voice:</label>
-        <select id="aiVoice"></select>
-    </div>
 
-    <div id="storageSettings" style="display: flex; flex-direction: column; gap: 5px; margin-top: 15px;">
-        <label>Privacy & Storage:</label>
-        <select id="storageMode">
-            <option value="server">Server (Sync across devices)</option>
-            <option value="client">Browser (Local Ephemeral)</option>
-        </select>
-    </div>
+        <div id="modelSettings" style="display: flex; flex-direction: column; gap: 5px; margin-top: 5px;">
+            <label>Model:</label>
+            <select id="aiModel"></select>
+        </div>
+
+        <div id="voiceSettings" style="display: flex; flex-direction: column; gap: 5px; margin-top: 5px;">
+            <label>Voice:</label>
+            <select id="aiVoice"></select>
+        </div>
+
+        <div id="storageSettings" style="display: flex; flex-direction: column; gap: 5px; margin-top: 15px;">
+            <label>Privacy & Storage:</label>
+            <select id="storageMode">
+                <option value="server">Server (Sync across devices)</option>
+                <option value="client">Browser (Local Ephemeral)</option>
+            </select>
+        </div>
 
         <button id="saveSettingsBtn" class="btn-primary" style="margin-top: auto;">Save</button>
         <button id="menuLogoutBtn" class="btn-danger" style="margin-top: 10px;">Logout</button>
     </div>
 
-    <script type="module" src="app.js?1"></script>
+    <script type="module" src="app.js?3"></script>
 </body>
+
 </html>

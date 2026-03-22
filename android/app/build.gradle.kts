@@ -30,6 +30,13 @@ android {
         jvmTarget = "17"
     }
     
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
     packaging {
         jniLibs {
             useLegacyPackaging = true

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Speax Search</title>
+    <link rel="stylesheet" href="/tool-shared.css">
+    <style>
+        .history-panel {
+            width: 250px;
+            background: var(--surface);
+            border-right: 1px solid var(--outline);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+        .results-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+        }
+        .search-result {
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+            background: var(--surface);
+            border-radius: 8px;
+            border: 1px solid var(--outline);
+        }
+        .result-title { color: var(--primary); font-size: 1.1rem; margin-bottom: 0.5rem; }
+        .result-url { color: var(--secondary); font-size: 0.8rem; margin-bottom: 0.5rem; }
+        .result-snippet { font-size: 0.9rem; color: var(--on-surface-medium); }
+        
+        .history-item {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--outline);
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+        .history-item:hover { background: var(--surface-variant); }
+        .history-item.active { border-left: 3px solid var(--primary); background: var(--glass); }
+        
+        #settings-modal {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 1000;
+            display: none; align-items: center; justify-content: center;
+        }
+    </style>
+</head>
+<body class="tool-content">
+    <div id="login-section" class="header hidden">
+        <h1>Auth Required</h1>
+        <button class="primary" onclick="window.location.href='/auth/login?client=tool'">Login with Google</button>
+    </div>
+
+    <div class="header" id="tool-header">
+        <h1><span class="badge">Search</span></h1>
+        <div style="display: flex; gap: 10px; align-items: center;">
+            <div class="status-indicator">
+                <div id="status-dot" class="dot"></div>
+                <span id="status-text">Disconnected</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="tool-body">
+        <div class="input-group" style="padding: 10px 20px; border-bottom: 1px solid var(--outline); margin-bottom: 0;">
+            <select id="provider-select" style="width: auto;">
+                <option value="all">All Providers</option>
+                <option value="ddg">DuckDuckGo</option>
+                <option value="brave">Brave</option>
+                <option value="tavily">Tavily</option>
+            </select>
+            <input type="text" id="manual-query" placeholder="Search the web...">
+            <button id="manual-search-btn" class="primary">Search</button>
+            <button class="btn-icon" id="settings-open-btn" title="Settings" style="margin-left:5px">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33 1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82 1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            </button>
+        </div>
+        <div class="tool-main" style="padding: 0;">
+            <div class="history-panel">
+                <div style="padding: 10px; font-weight: 600; color: var(--secondary); border-bottom: 1px solid var(--outline);">History</div>
+                <div id="history-list" class="list" style="overflow-y: auto;"></div>
+            </div>
+            <div class="results-panel">
+                <div id="results-list" style="padding: 20px;">
+                    <div style="text-align: center; color: var(--on-surface-medium); margin-top: 50px;">
+                        No results yet.
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div id="logs" class="logs"></div>
+    </div>
+
+    <div id="settings-modal">
+        <div class="card" style="width: 400px;">
+            <h2>Search Settings</h2>
+            <div style="display: flex; flex-direction: column; gap: 1rem;">
+                <div>
+                    <label style="font-size: 0.8rem; color: var(--on-surface-medium);">Brave API Key</label>
+                    <input type="text" id="brave-key-input" placeholder="Brave Key">
+                </div>
+                <div>
+                    <label style="font-size: 0.8rem; color: var(--on-surface-medium);">Tavily API Key</label>
+                    <input type="text" id="tavily-key-input" placeholder="Tavily Key">
+                </div>
+                <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
+                    <button class="secondary" onclick="document.getElementById('settings-modal').style.display='none'">Cancel</button>
+                    <button class="primary" id="settings-save-btn">Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { SpeaxToolClient } from '/speax-tool-client.mjs';
+        import { checkAuth, setupStatusIndicator, createLogger } from '/tool-shared.mjs';
+        import { DuckDuckGoProvider, SearXNGProvider, BraveSearchProvider, TavilySearchProvider, MultiProvider } from './search-provider.mjs?1';
+
+        const logger = createLogger('logs');
+        const historyList = document.getElementById('history-list');
+        const resultsList = document.getElementById('results-list');
+        const manualInput = document.getElementById('manual-query');
+        const manualBtn = document.getElementById('manual-search-btn');
+        const settingsModal = document.getElementById('settings-modal');
+        const settingsOpenBtn = document.getElementById('settings-open-btn');
+        const settingsSaveBtn = document.getElementById('settings-save-btn');
+        const providerSelect = document.getElementById('provider-select');
+
+        if (window.parent !== window) document.getElementById('tool-header').classList.add('hidden');
+        if (!checkAuth()) document.getElementById('login-section').classList.remove('hidden');
+
+        let searchHistory = JSON.parse(localStorage.getItem('speax_search_history') || '[]');
+        let activeProvider = null;
+        let providers = {};
+
+        async function initProviders() {
+            const braveApiKey = localStorage.getItem('brave_api_key');
+            const tavilyApiKey = localStorage.getItem('tavily_api_key');
+            
+            providers.ddg = new DuckDuckGoProvider();
+            providers.searxng = new MultiProvider([new SearXNGProvider("https://searx.be"), new SearXNGProvider("https://searxng.org")]);
+            if (braveApiKey) providers.brave = new BraveSearchProvider(braveApiKey);
+            if (tavilyApiKey) providers.tavily = new TavilySearchProvider(tavilyApiKey);
+
+            providers.all = new MultiProvider([providers.tavily, providers.brave, providers.searxng, providers.ddg].filter(Boolean));
+            activeProvider = providers[providerSelect.value] || providers.all;
+        }
+
+        function renderHistory() {
+            historyList.innerHTML = '';
+            searchHistory.forEach((h, i) => {
+                const div = document.createElement('div');
+                div.className = 'history-item';
+                const timeStr = new Date(h.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                div.innerHTML = `
+                    <div style="font-weight: 600;">${h.query}</div>
+                    <div style="font-size: 0.75rem; color: var(--on-surface-medium); margin-top: 2px;">
+                        ${timeStr} • ${h.results.length} results
+                    </div>
+                `;
+                div.onclick = () => showResults(i);
+                historyList.appendChild(div);
+            });
+        }
+
+        function showResults(index) {
+            const h = searchHistory[index];
+            if (!h) return;
+            // Mark as active in history panel
+            Array.from(historyList.children).forEach((child, i) => child.classList.toggle('active', i === index));
+            
+            resultsList.innerHTML = h.results.map(res => `
+                <div class="search-result">
+                    <div class="result-title"><a href="${res.url}" target="_blank" style="color: inherit; text-decoration: none;">${res.title}</a></div>
+                    <div class="result-url">${res.url}</div>
+                    <div class="result-snippet">${res.snippet}</div>
+                </div>
+            `).join('') || '<div style="text-align: center; color: var(--on-surface-medium);">No results.</div>';
+        }
+
+        async function performSearch(query) {
+            logger.log(`Searching: "${query}"...`);
+            try {
+                const results = await activeProvider.search(query);
+                const item = { query, timestamp: Date.now(), results };
+                searchHistory = [item, ...searchHistory.filter(h => h.query !== query)];
+                cleanupExpiredHistory();
+                localStorage.setItem('speax_search_history', JSON.stringify(searchHistory));
+                renderHistory();
+                showResults(0);
+                return results;
+            } catch (err) {
+                logger.log(`Error: ${err.message}`, 'error');
+            }
+        }
+
+        function cleanupExpiredHistory() {
+            const now = Date.now();
+            const originalLength = searchHistory.length;
+            
+            searchHistory = searchHistory.filter((item, index) => {
+                // Staggered retention policy:
+                // First 6: 48h (most recent)
+                // Next 6: 24h
+                // Next 6: 12h
+                let expiryHours = 12;
+                if (index < 6) expiryHours = 48;
+                else if (index < 12) expiryHours = 24;
+                else if (index < 18) expiryHours = 12;
+                else return false;
+                
+                const expiryMs = expiryHours * 60 * 60 * 1000;
+                const itemTime = typeof item.timestamp === 'number' ? item.timestamp : new Date(item.timestamp).getTime();
+                return (now - itemTime) < expiryMs;
+            });
+            
+            if (searchHistory.length !== originalLength) {
+                logger.log(`Auto-cleaned ${originalLength - searchHistory.length} expired history items.`);
+                localStorage.setItem('speax_search_history', JSON.stringify(searchHistory));
+            }
+        }
+
+        setInterval(cleanupExpiredHistory, 60000);
+
+        manualBtn.onclick = () => {
+            const q = manualInput.value.trim();
+            if (q) performSearch(q).then(() => manualInput.value = '');
+        };
+        manualInput.onkeypress = (e) => { if (e.key === 'Enter') manualBtn.onclick(); };
+
+        settingsOpenBtn.onclick = () => {
+            document.getElementById('brave-key-input').value = localStorage.getItem('brave_api_key') || '';
+            document.getElementById('tavily-key-input').value = localStorage.getItem('tavily_api_key') || '';
+            settingsModal.style.display = 'flex';
+        };
+
+        settingsSaveBtn.onclick = () => {
+            localStorage.setItem('brave_api_key', document.getElementById('brave-key-input').value.trim());
+            localStorage.setItem('tavily_api_key', document.getElementById('tavily-key-input').value.trim());
+            settingsModal.style.display = 'none';
+            initProviders();
+        };
+
+        const client = new SpeaxToolClient(window.location.origin, 'SearchTool');
+        setupStatusIndicator(client, 'status-dot', 'status-text');
+
+        client.registerAction('web_search', 'Performs a web search.', {
+            type: 'object', properties: { query: { type: 'string' } }, required: ['query']
+        }, async (p) => {
+            const res = await performSearch(p.query);
+            return { results: res.map(r => ({ title: r.title, snippet: r.snippet, url: r.url })) };
+        });
+
+        initProviders().then(() => {
+            client.connect();
+            renderHistory();
+        });
+    </script>
+</body>
+</html>

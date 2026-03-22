@@ -8,7 +8,7 @@ export class ServerClient {
 
     connect() {
         this.socket = new WebSocket(this.url);
-        
+
         this.socket.onopen = () => {
             this.isGeneratingAi = false;
             this.callbacks.onOpen();
@@ -39,6 +39,16 @@ export class ServerClient {
                 this.callbacks.onFullExportSync(JSON.parse(rawText.substring(13)));
             } else if (rawText.startsWith("[TTS_CHUNK]")) {
                 this.callbacks.onTtsChunk(rawText.substring(11));
+            } else if (rawText.startsWith("[TOOL_UI_EVENT]")) {
+                let eventPayload = null;
+                try {
+                    eventPayload = JSON.parse(rawText.substring(15));
+                } catch (e) {
+                    console.error("Failed to parse tool UI event", e);
+                }
+                if (eventPayload && this.callbacks.onToolUIEvent) {
+                    this.callbacks.onToolUIEvent(eventPayload);
+                }
             } else if (rawText.trim() === "[AI_START]") {
                 this.isGeneratingAi = true;
                 this.callbacks.onAiStart();
@@ -47,6 +57,8 @@ export class ServerClient {
                 this.callbacks.onAiEnd();
             } else if (rawText.trim() === "[IGNORED]") {
                 this.callbacks.onIgnored();
+            } else if (rawText.startsWith("[CHAT]")) {
+                this.callbacks.onUserText(rawText.substring(7));
             } else if (this.isGeneratingAi) {
                 this.callbacks.onAiText(rawText);
             } else if (rawText.trim() !== "") {
@@ -86,19 +98,19 @@ export class ServerClient {
     sendRequestFullExport() {
         this.send("[REQUEST_FULL_EXPORT]");
     }
-    
+
     sendNewThread(name) {
         this.send(`[NEW_THREAD]:${name}`);
     }
-    
+
     sendSwitchThread(id) {
         this.send(`[SWITCH_THREAD]:${id}`);
     }
-    
+
     sendRenameThread(name) {
         this.send(`[RENAME_THREAD]:${name}`);
     }
-    
+
     sendDeleteThread(id) {
         this.send(`[DELETE_THREAD]:${id}`);
     }

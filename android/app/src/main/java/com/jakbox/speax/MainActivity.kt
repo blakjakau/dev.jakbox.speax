@@ -81,6 +81,8 @@ import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 
 data class UiMessage(val role: String, val content: String)
 data class ThreadItem(val id: String, val name: String)
@@ -89,6 +91,7 @@ class MainActivity : ComponentActivity() {
 
     private var speaxWebSocket: SpeaxWebSocket? = null
     lateinit var audioEngine: AudioEngine
+    private val notificationSounds = NotificationSounds()
     private val httpClient = OkHttpClient()
     private var mediaSession: MediaSession? = null
 
@@ -121,6 +124,8 @@ class MainActivity : ComponentActivity() {
     var useNativeStt by mutableStateOf(false)
     var isNativeSttSupported by mutableStateOf(false)
     var useLocalTts by mutableStateOf(false)
+    var passiveAssistant by mutableStateOf(false)
+    var micProfile by mutableStateOf("standard")
 
     // Memory & Thread State
     var memorySummary by mutableStateOf("No summary generated yet.")
@@ -135,17 +140,33 @@ class MainActivity : ComponentActivity() {
 
     // Auth State
     var sessionCookie by mutableStateOf<String?>(null)
+    private var wasSuccessfullyConnected = false
+    private var suppressNextConnectTone = false
+    private var suppressNextDisconnectTone = false
 
     // Native STT
     private var speechRecognizer: SpeechRecognizer? = null
     private var nativeSttIntent: Intent? = null
 
     private var isAppInForeground = false
+    private var cpuWakeLock: PowerManager.WakeLock? = null
 
     private lateinit var piperEngine: PiperEngine
     private val piperMutex = Mutex() // Ensures we only synthesize one sentence at a time (saves CPU)
 
-    private val serverUrl = "wss://speax.jakbox.dev/ws"
+    private val leadingCommaRe = Regex(",\\s+([A-Z])")
+    private val mdRe = Regex("[*_`#~]")
+    private val wsRe = Regex("\\s{2,}")
+
+    private fun sanitiseTTSText(text: String): String {
+        var processedText = text
+        processedText = leadingCommaRe.replace(processedText, " $1")
+        processedText = mdRe.replace(processedText, "")
+        processedText = wsRe.replace(processedText, " ")
+        return processedText.trim()
+    }
+	
+	private val serverUrl = "wss://speax.jakbox.dev/ws"
     private val authUrl = "https://speax.jakbox.dev/auth/login?client=android"
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -170,6 +191,8 @@ class MainActivity : ComponentActivity() {
         isNativeSttSupported = SpeechRecognizer.isRecognitionAvailable(this)
         useNativeStt = prefs.getBoolean("use_native_stt", isNativeSttSupported) // Default to true if hardware supports it
         useLocalTts = prefs.getBoolean("use_local_tts", false)
+        passiveAssistant = prefs.getBoolean("passive_assistant", false)
+        micProfile = prefs.getString("mic_profile", "standard") ?: "standard"
 
         // 0. Initialize Edge TTS Pipeline
         piperEngine = PiperEngine(this)
@@ -178,10 +201,7 @@ class MainActivity : ComponentActivity() {
         }
 
         // 1. Initialize Audio Engine
-        audioEngine = AudioEngine(onSpeechFinalized = { pcmData ->
-            speaxWebSocket?.sendAudio(pcmData)
-            runOnUiThread { statusText = "Processing with AI..." }
-        }, onVolumeChange = { rms ->
+        audioEngine = AudioEngine(onSpeechFinalized = { _, _ -> }, onVolumeChange = { rms ->
             // Pass RMS back to UI thread for Visualizer scaling
             if (isAppInForeground) runOnUiThread { currentRms = rms }
         }, onSpeechStart = {
@@ -191,7 +211,15 @@ class MainActivity : ComponentActivity() {
             if (isAppInForeground) runOnUiThread { aiRms = rms }
         }, onBufferProgress = { progress ->
             if (isAppInForeground) runOnUiThread { playbackProgress = progress }
+        }, onPlaybackComplete = {
+            speaxWebSocket?.sendText("[PLAYBACK_COMPLETE]")
+        }, onStreamingChunk = { pcmData, seqID, type ->
+            speaxWebSocket?.sendStreamingChunk(type, seqID, pcmData)
+            if (type == 0x02.toByte()) {
+                runOnUiThread { statusText = "Processing with AI..." }
+            }
         })
+        audioEngine.micProfile = micProfile
 
         // 2. Request Mic & Notification Permissions
         val requestPermissionLauncher = registerForActivityResult(
@@ -214,7 +242,19 @@ class MainActivity : ComponentActivity() {
         setupMediaSession()
         setupSpeechRecognizer()
 
-        // 3. Render UI
+        // 3. Auto-connect if we have a session
+        if (sessionCookie != null) {
+            connectWebSocket()
+        }
+		
+		// Register the local receiver so we can use mute/playpause hardware
+	    val filter = IntentFilter("SPEAX_HARDWARE_BTN")
+	    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+	        registerReceiver(hardwareButtonReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+	    } else {
+	        registerReceiver(hardwareButtonReceiver, filter)
+	    }
+	        // 3. Render UI
         setContent {
             SpeaxTheme {
                 if (sessionCookie == null) {
@@ -229,11 +269,65 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         isAppInForeground = true
+        updateWakeLocks()
     }
 
     override fun onPause() {
         super.onPause()
         isAppInForeground = false
+        updateWakeLocks()
+    }
+
+	// binding the media play/pause controls
+	private val hardwareButtonReceiver = object : BroadcastReceiver() {
+	    override fun onReceive(context: Context?, intent: Intent?) {
+	        if (intent?.action == "SPEAX_HARDWARE_BTN") {
+	            val keyCode = intent.getIntExtra("keycode", -1)
+	            when (keyCode) {
+	                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+	                KeyEvent.KEYCODE_HEADSETHOOK,
+	                KeyEvent.KEYCODE_MEDIA_PLAY,
+	                KeyEvent.KEYCODE_MEDIA_PAUSE -> toggleAiPause()
+	                
+	                KeyEvent.KEYCODE_MUTE,
+	                KeyEvent.KEYCODE_VOLUME_MUTE -> toggleMicMute()
+	            }
+	        }
+	    }
+	}
+
+    /**
+     * Centralized wake lock management.
+     * - FLAG_KEEP_SCREEN_ON: Prevents display sleep when mic is active AND activity is visible.
+     * - PARTIAL_WAKE_LOCK: Prevents CPU sleep when mic is active (even with screen off).
+     */
+    private fun updateWakeLocks() {
+        val micActive = isConnected && !isMicMuted
+
+        // Screen wake: only when activity is in the foreground
+        if (micActive && isAppInForeground) {
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+
+        // CPU wake: keep the CPU alive whenever mic is recording (even if screen is off)
+        if (micActive) {
+            if (cpuWakeLock == null) {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                cpuWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "speax:mic_active")
+                cpuWakeLock?.acquire()
+                Log.d("WakeLock", "PARTIAL_WAKE_LOCK acquired")
+            }
+        } else {
+            cpuWakeLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                    Log.d("WakeLock", "PARTIAL_WAKE_LOCK released")
+                }
+            }
+            cpuWakeLock = null
+        }
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -262,44 +356,85 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateBackgroundService() {
-        val intent = Intent(this, SpeaxService::class.java)
-        if (isConnected && !isMicMuted) {
-            intent.action = "START"
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
-            }
-        } else {
-            intent.action = "STOP"
-            startService(intent)
-        }
-    }
+	    val intent = Intent(this, SpeaxService::class.java)
+	    if (isConnected) {
+	        intent.action = "START"
+	        // Pass the token to the background service
+	        mediaSession?.sessionToken?.let { token ->
+	            intent.putExtra("session_token", token)
+	        }
+	        // Pass the current mute/pause state to the notification
+	        intent.putExtra("is_muted", isMicMuted || isAiPaused)
+	        
+	        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+	            startForegroundService(intent)
+	        } else {
+	            startService(intent)
+	        }
+	    } else {
+	        intent.action = "STOP"
+	        startService(intent)
+	    }
+	}
 
     private fun setupMediaSession() {
         mediaSession = MediaSession(this, "SpeaxMediaSession").apply {
+            @Suppress("DEPRECATION")
+            setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
+            
+            // Tell the OS we are in a Voice Communication (Call) session!
+            // This is required for many headsets to route buttons correctly when the mic is open.
+            val callAttributes = android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            setPlaybackToLocal(callAttributes)
+
             setCallback(object : MediaSession.Callback() {
                 override fun onPlay() { runOnUiThread { if (isAiPaused) toggleAiPause() } }
                 override fun onPause() { runOnUiThread { if (!isAiPaused) toggleAiPause() } }
                 override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
-                    val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        mediaButtonIntent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
-                    }
-                    if (keyEvent != null && keyEvent.action == KeyEvent.ACTION_DOWN) {
-                        val keyCode = keyEvent.keyCode
-                        if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
-                            keyCode == KeyEvent.KEYCODE_HEADSETHOOK ||
-                            keyCode == KeyEvent.KEYCODE_MEDIA_PLAY ||
-                            keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE) {
-                            runOnUiThread { toggleAiPause() }
-                            return true
-                        }
-                    }
-                    return super.onMediaButtonEvent(mediaButtonIntent)
-                }
+				    val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+				        mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+				    } else {
+				        @Suppress("DEPRECATION")
+				        mediaButtonIntent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+				    }
+				
+				    if (keyEvent != null) {
+				        val keyCode = keyEvent.keyCode
+				        val action = keyEvent.action
+				        
+				        if (action == KeyEvent.ACTION_DOWN) {
+				            // Acknowledge the press so the OS knows we have focus, but do nothing yet
+				            when (keyCode) {
+				                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+				                KeyEvent.KEYCODE_HEADSETHOOK,
+				                KeyEvent.KEYCODE_MEDIA_PLAY,
+				                KeyEvent.KEYCODE_MEDIA_PAUSE,
+				                KeyEvent.KEYCODE_MUTE,
+				                KeyEvent.KEYCODE_VOLUME_MUTE -> return true
+				            }
+				        } else if (action == KeyEvent.ACTION_UP) {
+				            // Execute the toggle when the user releases the button
+				            when (keyCode) {
+				                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+				                KeyEvent.KEYCODE_HEADSETHOOK,
+				                KeyEvent.KEYCODE_MEDIA_PLAY,
+				                KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+				                    runOnUiThread { toggleAiPause() }
+				                    return true
+				                }
+				                KeyEvent.KEYCODE_MUTE,
+				                KeyEvent.KEYCODE_VOLUME_MUTE -> {
+				                    runOnUiThread { toggleMicMute() }
+				                    return true
+				                }
+				            }
+				        }
+				    }
+				    return super.onMediaButtonEvent(mediaButtonIntent)
+				}
             })
             isActive = true
         }
@@ -308,9 +443,13 @@ class MainActivity : ComponentActivity() {
 
     private fun updateMediaSessionState() {
         val state = if (isAiPaused || !isConnected) PlaybackState.STATE_PAUSED else PlaybackState.STATE_PLAYING
+        
+        // Provide a simulated moving position when playing to help the OS recognize activity
+        val position = if (state == PlaybackState.STATE_PLAYING) System.currentTimeMillis() else PlaybackState.PLAYBACK_POSITION_UNKNOWN
+        
         val playbackState = PlaybackState.Builder()
             .setActions(PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or PlaybackState.ACTION_PLAY_PAUSE)
-            .setState(state, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+            .setState(state, position, 1.0f)
             .build()
         mediaSession?.setPlaybackState(playbackState)
     }
@@ -456,6 +595,7 @@ class MainActivity : ComponentActivity() {
             putString("google_name", googleName)
             putBoolean("use_native_stt", useNativeStt)
             putBoolean("use_local_tts", useLocalTts)
+            putBoolean("passive_assistant", passiveAssistant)
         }.apply()
 	}
 
@@ -471,6 +611,7 @@ class MainActivity : ComponentActivity() {
             put("voice", aiVoice)
             put("clientStorage", false)
             put("clientTts", useLocalTts)
+            put("passiveAssistant", passiveAssistant)
         }
         speaxWebSocket?.sendText("[SETTINGS]$settingsJson")
     }
@@ -554,8 +695,10 @@ class MainActivity : ComponentActivity() {
 
     fun toggleConnection() {
         if (isConnected) {
+            suppressNextDisconnectTone = true
             disconnectWebSocket()
         } else {
+            suppressNextConnectTone = true
             connectWebSocket()
         }
     }
@@ -611,24 +754,50 @@ class MainActivity : ComponentActivity() {
         val fullUrl = "$serverUrl?client=android&device=$deviceName"
 
         statusText = "Connecting..."
-        speaxWebSocket = SpeaxWebSocket(
+        
+        // Ensure only one connection exists: explicitly disconnect any lingering socket
+        speaxWebSocket?.disconnect()
+        
+        val newSocket = SpeaxWebSocket(
             url = fullUrl,
             cookie = sessionCookie ?: "",
-            onTextReceived = { text ->
-                // OkHttp calls this on a background thread. Keep the JSON parsing here!
-                handleIncomingText(text)
+            onTextReceived = { socket, text ->
+                if (speaxWebSocket == socket) {
+                    handleIncomingText(text)
+                }
             },
-            onAudioReceived = { audioBytes ->
-                Log.d("SpeaxClient", "RX Audio: ${audioBytes.size} bytes")
-                audioEngine.playAudioChunk(audioBytes)
+            onAudioReceived = { socket, audioBytes ->
+                if (speaxWebSocket == socket) {
+                    Log.d("SpeaxClient", "RX Audio: ${audioBytes.size} bytes")
+                    audioEngine.playAudioChunk(audioBytes)
+                }
             },
-            onClosed = {
-                if (isConnected) {
-                    attemptReconnect()
+            onConnected = { socket ->
+                if (speaxWebSocket == socket) {
+                    wasSuccessfullyConnected = true
+                    if (!suppressNextConnectTone) {
+                        notificationSounds.playConnect()
+                    }
+                    suppressNextConnectTone = false
+                }
+            },
+            onClosed = { socket ->
+                if (speaxWebSocket == socket) {
+                    if (wasSuccessfullyConnected) {
+                        if (!suppressNextDisconnectTone) {
+                            notificationSounds.playDisconnect()
+                        }
+                        wasSuccessfullyConnected = false
+                        suppressNextDisconnectTone = false
+                    }
+                    if (isConnected) {
+                        attemptReconnect()
+                    }
                 }
             }
         )
-        speaxWebSocket?.connect()
+        speaxWebSocket = newSocket
+        newSocket.connect()
         
         // Ask the Go server for the latest settings, threads, and history
         // The server is the single source of truth for cross-device sessions
@@ -643,7 +812,9 @@ class MainActivity : ComponentActivity() {
         }
         statusText = "Listening..."
         updateBackgroundService()
+        mediaSession?.isActive = true
         updateMediaSessionState()
+        updateWakeLocks()
     }
 
     private var retryCount = 0
@@ -722,8 +893,8 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 text.startsWith("[TTS_CHUNK]") -> {
-                    val chunk = text.removePrefix("[TTS_CHUNK]")
-                    if (useLocalTts) {
+                    val chunk = sanitiseTTSText(text.removePrefix("[TTS_CHUNK]"))
+                    if (useLocalTts && chunk.isNotBlank()) {
                         lifecycleScope.launch(Dispatchers.IO) {
                             piperMutex.withLock {
                                 val audioBytes = piperEngine.synthesize(chunk, aiVoice)
@@ -744,7 +915,7 @@ class MainActivity : ComponentActivity() {
                         val s = JSONObject(text.removePrefix("[SUMMARY]"))
                         parsedSummary = s.optString("text", "No summary generated yet.")
                         pArchive = s.optInt("archiveTurns", 0)
-                        pMaxArchive = s.optInt("maxArchiveTurns", 100)
+                        pMaxArchive = s.optInt("maxArchiveTurns", 250)
                         pEstTokens = s.optInt("estTokens", 0)
                         pMaxTokens = s.optInt("maxTokens", 8192)
                     } catch (e: Exception) {
@@ -787,7 +958,6 @@ class MainActivity : ComponentActivity() {
                         isGeneratingAi = true
                         isAiPaused = false // Resync UI: The AI is speaking a new thought
                         messages.add(UiMessage("assistant", ""))
-                        audioEngine.abortPlayback() // The AI is thinking something new, nuke the old audio queue
                         statusText = "Alyx is speaking..."
                     }
                 }
@@ -796,6 +966,17 @@ class MainActivity : ComponentActivity() {
                         isGeneratingAi = false
                         isAiPaused = false
                         statusText = "Listening..."
+                    }
+                }
+                text.startsWith("[CHAT]:") -> {
+                    val content = text.removePrefix("[CHAT]:").trim()
+                    if (content.isNotBlank()) {
+                        audioEngine.abortPlayback() // Sync execution on WebSocket thread to avoid race with incoming audio chunks
+                        runOnUiThread {
+                            isAiPaused = false // Resync UI
+                            messages.add(UiMessage("user", content))
+                            // Ensure it scrolls to bottom (handled by LaunchedEffect normally)
+                        }
                     }
                 }
                 text == "[IGNORED]" -> {
@@ -817,6 +998,9 @@ class MainActivity : ComponentActivity() {
                     // Ignore other system sync messages like [SUMMARY], [SETTINGS], [THREADS] for now
                 }
                 else -> {
+                    if (!isGeneratingAi && text.isNotBlank()) {
+                        audioEngine.abortPlayback() // We successfully barged in, nuke the old audio queue
+                    }
                     runOnUiThread {
                         if (isGeneratingAi) {
                             // Append token to the last AI message for typewriter effect
@@ -827,7 +1011,6 @@ class MainActivity : ComponentActivity() {
                         } else if (text.isNotBlank()) {
                             // It's the transcribed User text
                             isAiPaused = false // Resync UI
-                            audioEngine.abortPlayback() // We successfully barged in, nuke the old audio queue
                             messages.add(UiMessage("user", text.trim()))
                         }
                     }
@@ -851,33 +1034,41 @@ class MainActivity : ComponentActivity() {
             }
         } else {
             audioEngine.isMicMuted = isMicMuted
+            if (isMicMuted) audioEngine.forceEndStreaming()
         }
         
         updateBackgroundService()
+        updateWakeLocks()
     }
 
     fun toggleAiPause() {
         isAiPaused = !isAiPaused
         if (isAiPaused) {
+            speaxWebSocket?.sendText("[PAUSE]")
             audioEngine.suspendPlayback()
             isMicMuted = true
             audioEngine.isMicMuted = true
+            audioEngine.forceEndStreaming()
             if (useNativeStt) stopNativeListening()
         } else {
+            speaxWebSocket?.sendText("[RESUME]")
             audioEngine.resumePlayback()
             isMicMuted = false
             audioEngine.isMicMuted = false
             if (useNativeStt) restartNativeListening()
+            else audioEngine.startRecording()
         }
         updateBackgroundService()
         updateMediaSessionState()
+        updateWakeLocks()
     }
 
     fun switchThread(id: String) { speaxWebSocket?.sendText("[SWITCH_THREAD]:$id") }
     fun deleteThread(id: String) { speaxWebSocket?.sendText("[DELETE_THREAD]:$id") }
     fun newThread(name: String) { speaxWebSocket?.sendText("[NEW_THREAD]:$name") }
     fun renameThread(name: String) { speaxWebSocket?.sendText("[RENAME_THREAD]:$name") }
-    fun sendTextPrompt(text: String) { speaxWebSocket?.sendText("[TEXT_PROMPT]:$text") }
+    fun sendTextPrompt(text: String) { speaxWebSocket?.sendText("[TEXT_PROMPT:${System.currentTimeMillis()}]:$text") }
+    fun sendTypedPrompt(text: String) { speaxWebSocket?.sendText("[TYPED_PROMPT:${System.currentTimeMillis()}]:$text") }
     fun deleteMessagePair(index: Int) {
         speaxWebSocket?.sendText("[DELETE_MSG]:$index")
         // Optimistically remove from local UI instantly for a snappy feel
@@ -908,7 +1099,9 @@ class MainActivity : ComponentActivity() {
         isConnected = false
         statusText = "Disconnected"
         updateBackgroundService()
+        mediaSession?.isActive = false
         updateMediaSessionState()
+        updateWakeLocks()
 
         // Release the audio focus back to normal so standard media apps don't sound muffled
         val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -947,7 +1140,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+	    unregisterReceiver(hardwareButtonReceiver)
         audioEngine.stopRecording()
+        audioEngine.release()
         disconnectWebSocket()
         speechRecognizer?.destroy()
         mediaSession?.release()
@@ -1200,6 +1395,57 @@ fun ChatScreen() {
                     )
                     Spacer(Modifier.height(24.dp))
 
+                    // Mic Profile Dropdown
+                    var expandedMicDropdown by remember { mutableStateOf(false) }
+                    val micProfiles = listOf(
+                        "sensitive" to "Sensitive (Low Filtering)",
+                        "standard" to "Standard", 
+                        "adaptive" to "Adaptive Filtering", 
+                        "heavy" to "Heavy Filtering", 
+                        "mute_playback" to "Mute on Playback"
+                    )
+                    val currentMicProfileLabel = micProfiles.find { it.first == mainActivity.micProfile }?.second ?: "Standard"
+
+                    ExposedDropdownMenuBox(
+                        expanded = expandedMicDropdown,
+                        onExpandedChange = { expandedMicDropdown = !expandedMicDropdown }
+                    ) {
+                        OutlinedTextField(
+                            value = currentMicProfileLabel,
+                            onValueChange = { },
+                            readOnly = true,
+                            label = { Text("Mic Profile") },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedMicDropdown) },
+                            modifier = Modifier.fillMaxWidth().menuAnchor()
+                        )
+                        ExposedDropdownMenu(
+                            expanded = expandedMicDropdown,
+                            onDismissRequest = { expandedMicDropdown = false }
+                        ) {
+                            micProfiles.forEach { (value, label) ->
+                                DropdownMenuItem(
+                                    text = { Text(label) },
+                                    onClick = {
+                                        mainActivity.micProfile = value
+                                        mainActivity.getSharedPreferences("speax_prefs", Context.MODE_PRIVATE).edit().putString("mic_profile", value).apply()
+                                        mainActivity.audioEngine.micProfile = value
+                                        expandedMicDropdown = false
+                                        // If using heavy, sensitive, or standard, we need to restart the engine to apply new AudioSource/FX
+                                        if (value == "heavy" || mainActivity.micProfile == "heavy" || 
+                                            value == "sensitive" || mainActivity.micProfile == "sensitive" ||
+                                            value == "standard" || mainActivity.micProfile == "standard") {
+                                            if (!mainActivity.isMicMuted) {
+                                                mainActivity.audioEngine.stopRecording()
+                                                mainActivity.audioEngine.startRecording()
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(16.dp))
+
                     // Native STT Toggle
                     if (mainActivity.isNativeSttSupported) {
                         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1222,6 +1468,23 @@ fun ChatScreen() {
                                 mainActivity.useLocalTts = isLocal
                                 mainActivity.pushSettingsToServer()
                                 mainActivity.fetchVoices() 
+                            },
+                            colors = SwitchDefaults.colors(checkedThumbColor = MaterialTheme.colorScheme.primary, checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                        )
+                    }
+                    Spacer(Modifier.height(16.dp))
+
+                    // Passive Assistant Toggle
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Passive Assistant", color = MaterialTheme.colorScheme.onSurface)
+                            Text("Only responds when addressed by name (e.g. Alyx)", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
+                        }
+                        Switch(
+                            checked = mainActivity.passiveAssistant,
+                            onCheckedChange = { isPassive -> 
+                                mainActivity.passiveAssistant = isPassive
+                                mainActivity.pushSettingsToServer()
                             },
                             colors = SwitchDefaults.colors(checkedThumbColor = MaterialTheme.colorScheme.primary, checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
                         )
@@ -1441,6 +1704,11 @@ fun ChatScreen() {
                             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
                             .padding(horizontal = 12.dp, vertical = 6.dp)
                     )
+                    
+                    PlaybackProgressBar(
+                        mainActivity = mainActivity,
+                        modifier = Modifier.fillMaxWidth().height(4.dp)
+                    )
 
                 when (selectedTab) {
                     0 -> HomeTab(mainActivity)
@@ -1516,8 +1784,35 @@ fun ChatScreen() {
         }
                 } // Closes Column wrapping status bar + tab content
     } // Closes Box
-    } // Closes outer Box for Gradient
+} // Closes Outer Box for Gradient
     } // Closes Scaffold
 } // Closes ModalNavigationDrawer
 } // Closes ChatScreen
+
+@Composable
+fun PlaybackProgressBar(mainActivity: MainActivity, modifier: Modifier = Modifier) {
+    var animatedProgress by remember { mutableFloatStateOf(0f) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            androidx.compose.runtime.withFrameNanos {
+                val targetProgress = mainActivity.playbackProgress.coerceIn(0f, 1f)
+                if (targetProgress == 0f) {
+                    animatedProgress = 0f // Snap instantly to 0 when audio finishes or aborts
+                } else {
+                    animatedProgress += (targetProgress - animatedProgress) * 0.1f // Smooth lerp forward
+                }
+            }
+        }
+    }
+
+    Box(modifier = modifier.background(MaterialTheme.colorScheme.background)) {
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .fillMaxWidth(fraction = animatedProgress)
+                .background(androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.secondary)))
+        )
+    }
+}
 

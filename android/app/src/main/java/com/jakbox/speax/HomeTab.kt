@@ -50,11 +50,6 @@ fun HomeTab(mainActivity: MainActivity) {
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        PlaybackProgressBar(
-            mainActivity = mainActivity,
-            modifier = Modifier.fillMaxWidth().height(4.dp).align(Alignment.TopCenter)
-        )
-
         val shiftAmount = LocalConfiguration.current.screenHeightDp.dp * 0.15f
 
         Box(
@@ -130,33 +125,6 @@ fun HomeTab(mainActivity: MainActivity) {
                 }
             }
         }
-    }
-}
-
-@Composable
-fun PlaybackProgressBar(mainActivity: MainActivity, modifier: Modifier = Modifier) {
-    var animatedProgress by remember { mutableFloatStateOf(0f) }
-
-    LaunchedEffect(Unit) {
-        while (true) {
-            androidx.compose.runtime.withFrameNanos {
-                val targetProgress = mainActivity.playbackProgress.coerceIn(0f, 1f)
-                if (targetProgress == 0f) {
-                    animatedProgress = 0f // Snap instantly to 0 when audio finishes or aborts
-                } else {
-                    animatedProgress += (targetProgress - animatedProgress) * 0.1f // Smooth lerp forward
-                }
-            }
-        }
-    }
-
-    Box(modifier = modifier.background(MaterialTheme.colorScheme.background)) {
-        Box(
-            modifier = Modifier
-                .fillMaxHeight()
-                .fillMaxWidth(fraction = animatedProgress)
-                .background(Brush.horizontalGradient(listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.secondary)))
-        )
     }
 }
 

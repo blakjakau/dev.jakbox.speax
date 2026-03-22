@@ -180,9 +180,40 @@ input::placeholder, textarea::placeholder { color: var(--slate-high); }
 
 /* Message Bubbles */
 .msg-row { display: flex; align-items: center; margin-bottom: 10px; justify-content: space-between; }
-.msg-content { white-space: pre-wrap; word-break: break-word; }
+.msg-content { white-space: pre-wrap; word-break: break-word; transition: max-height 0.3s ease; flex-grow: 1; }
 .msg-assistant { color: var(--text-bright); font-weight: bold; }
+.msg-system { color: #888; font-style: italic; }
 .msg-user { color: var(--text-soft); }
+
+.collapsed-msg {
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
+    -webkit-box-orient: vertical;
+    white-space: normal;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    opacity: 0.8;
+}
+.collapsed-msg:hover {
+    opacity: 1;
+}
+.btn-toggle-expand {
+    background: transparent;
+    border: 1px solid var(--slate-high);
+    color: var(--text-soft);
+    padding: 2px 8px;
+    font-size: 10px;
+    border-radius: 10px;
+    cursor: pointer;
+    margin-left: 8px;
+    flex-shrink: 0;
+}
+.btn-toggle-expand:hover {
+    background: var(--slate-high);
+    color: var(--text-bright);
+}
 
 /* Memory UI */
 .memory-box {
