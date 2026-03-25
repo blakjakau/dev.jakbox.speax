@@ -552,3 +552,9 @@ Java_com_jakbox_speax_NativeAudioEngine_setThreshold(JNIEnv* env, jobject obj, j
     AudioEngineContext* ctx = (AudioEngineContext*)ptr;
     ctx->vad.setThreshold(threshold);
 }
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_jakbox_speax_NativeAudioEngine_setPlaybackActive(JNIEnv* env, jobject obj, jlong ptr, jboolean active) {
+    AudioEngineContext* ctx = (AudioEngineContext*)ptr;
+    ctx->vad.setPlaybackActive(active);
+}

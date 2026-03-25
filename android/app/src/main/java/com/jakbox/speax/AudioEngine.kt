@@ -30,10 +30,16 @@ class AudioEngine(
     @Volatile private var isPausedLocally = false
     var isMicMuted = false
         set(value) {
+            Log.d("AudioEngine", "Switching Mic Mute: $field -> $value")
             field = value
             nativeAudioEngine?.setMuted(value)
         }
     var micProfile: String = "standard"
+        set(value) {
+            Log.d("AudioEngine", "Switching Mic Profile: $field -> $value")
+            field = value
+            nativeAudioEngine?.setProfile(value)
+        }
     var averageSpeechRms = 600.0 // Baseline adaptive RMS tracker
     private var totalAiFrames = 0
     private var totalWrittenFrames = 0
@@ -41,26 +47,43 @@ class AudioEngine(
     private var currentSeqID = 0L
 
     var noiseThreshold = 255.0
+        set(value) {
+            Log.d("AudioEngine", "Switching Noise Threshold: $field -> $value")
+            field = value
+            nativeAudioEngine?.setThreshold(value)
+        }
+    var isPlaybackActive = false
+        set(value) {
+            Log.d("AudioEngine", "Switching Playback Active: $field -> $value")
+            field = value
+            nativeAudioEngine?.setPlaybackActive(value)
+        }
 
     private var nativeAudioEngine: NativeAudioEngine? = null
 
     init {
         nativeAudioEngine = NativeAudioEngine(
             onSpeechStart = {
-                Log.d("AudioEngine", "Speech detected! Suspending playback instantly.")
-                suspendPlayback()
-                onSpeechStart()
+                if (!isMicMuted) {
+                    Log.d("AudioEngine", "Speech detected! Suspending playback instantly.")
+                    suspendPlayback()
+                    onSpeechStart()
+                }
             },
             onStreamingChunk = { buffer, size, type ->
-                val byteArray = ByteArray(size)
-                buffer.get(byteArray)
-                onStreamingChunk(byteArray, currentSeqID, type)
+                if (!isMicMuted) {
+                    val byteArray = ByteArray(size)
+                    buffer.get(byteArray)
+                    onStreamingChunk(byteArray, currentSeqID, type)
+                }
             },
             onSpeechEnd = { buffer, size ->
-                val byteArray = ByteArray(size)
-                buffer.get(byteArray)
-                Log.d("AudioEngine", "Native VAD: End of speech, sending final ${byteArray.size} bytes")
-                onStreamingChunk(byteArray, currentSeqID, 0x02.toByte()) // 0x02: END
+                if (!isMicMuted) {
+                    val byteArray = ByteArray(size)
+                    buffer.get(byteArray)
+                    Log.d("AudioEngine", "Native VAD: End of speech, sending final ${byteArray.size} bytes")
+                    onStreamingChunk(byteArray, currentSeqID, 0x02.toByte()) // 0x02: END
+                }
             },
             onVolumeChange = { rms ->
                 onVolumeChange(if (isMicMuted) 0f else rms)
@@ -70,16 +93,43 @@ class AudioEngine(
 
     @SuppressLint("MissingPermission")
     fun startRecording() {
+        Log.d("AudioEngine", "Starting recording with profile=$micProfile, threshold=$noiseThreshold, muted=$isMicMuted")
+        
+        // Safety: Ensure any previous session is stopped first
+        nativeAudioEngine?.stop()
+        
         nativeAudioEngine?.setProfile(micProfile)
         nativeAudioEngine?.setThreshold(noiseThreshold)
+        nativeAudioEngine?.setMuted(isMicMuted) // Apply current mute state
+        nativeAudioEngine?.setPlaybackActive(isPlaybackActive) // Apply current playback state
         currentSeqID = System.currentTimeMillis()
-        val result = nativeAudioEngine?.start()
-        if (result != 0) {
-            Log.e("AudioEngine", "Failed to start native audio engine: $result")
+        
+        // Retry logic: opening the mic can fail if the audio system is busy or transitioning modes
+        var attempts = 3
+        while (attempts > 0) {
+            val result = nativeAudioEngine?.start() ?: -1
+            if (result == 0) {
+                Log.d("AudioEngine", "Native audio engine started successfully.")
+                break
+            }
+            
+            attempts--
+            Log.w("AudioEngine", "Failed to start native audio engine: $result. Attempts remaining: $attempts")
+            if (attempts > 0) {
+                try {
+                    // Increased delay slightly to give more room for system transitions
+                    Thread.sleep(800)
+                } catch (e: InterruptedException) {
+                    break
+                }
+            } else {
+                Log.e("AudioEngine", "Giving up on starting native audio engine after 3 attempts.")
+            }
         }
     }
 
     fun stopRecording() {
+        Log.d("AudioEngine", "Stopping recording (current profile=$micProfile)")
         nativeAudioEngine?.stop()
     }
 

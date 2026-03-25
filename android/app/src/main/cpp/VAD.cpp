@@ -23,6 +23,11 @@ VAD::Result VAD::processFrame(const int16_t* pcm, int sizeSamples) {
     double currentThreshold = (profile == "adaptive") ? std::max(100.0, averageSpeechRms * 0.3) : (profile == "standard" ? noiseThreshold.load() * 1.15 : noiseThreshold.load());
     if (profile == "sensitive") currentThreshold = 150.0;
 
+    // Boost threshold during playback for HEAVY and ADAPTIVE to reduce false barge-ins
+    if (isPlaybackActive && (profile == "heavy" || profile == "adaptive")) {
+        currentThreshold *= 1.5;
+    }
+
     State nextState = currentState;
     bool stateChanged = false;
 

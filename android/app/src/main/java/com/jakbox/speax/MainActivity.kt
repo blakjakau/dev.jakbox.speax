@@ -25,6 +25,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.WindowCompat
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.Animatable
@@ -77,72 +78,65 @@ import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
-import com.k2fsa.sherpa.onnx.OfflineTts
-import com.k2fsa.sherpa.onnx.OfflineTtsConfig
-import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
-import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
 
-data class UiMessage(val role: String, val content: String)
-data class ThreadItem(val id: String, val name: String)
+// UiMessage and ThreadItem removed (now in SpeaxManager)
 
 class MainActivity : ComponentActivity() {
 
-    private var speaxWebSocket: SpeaxWebSocket? = null
-    lateinit var audioEngine: AudioEngine
+    val speaxWebSocket get() = SpeaxManager.speaxWebSocket
+    val audioEngine get() = SpeaxManager.audioEngine
     private val notificationSounds = NotificationSounds()
     private val httpClient = OkHttpClient()
     private var mediaSession: MediaSession? = null
 
     // State variables that Compose will observe to update the UI instantly
-    val messages = mutableStateListOf<UiMessage>()
-    var isConnected by mutableStateOf(false)
-    var statusText by mutableStateOf("Disconnected")
-    private var isGeneratingAi = false
-    var currentRms by mutableStateOf(0f)
-    var aiRms by mutableStateOf(0f)
-    var playbackProgress by mutableStateOf(0f)
-    var isMicMuted by mutableStateOf(false)
-    var isAiPaused by mutableStateOf(false)
+    val messages = SpeaxManager.messages
+    var isConnected by SpeaxManager::isConnected
+    var statusText by SpeaxManager::statusText
+    var isGeneratingAi by SpeaxManager::isGeneratingAi
+    var currentRms by SpeaxManager::currentRms
+    var aiRms by SpeaxManager::aiRms
+    var playbackProgress by SpeaxManager::playbackProgress
+    var isMicMuted by SpeaxManager::isMicMuted
+    var isAiPaused by SpeaxManager::isAiPaused
     private var wakeLock: PowerManager.WakeLock? = null
     private val focusChangeListener = AudioManager.OnAudioFocusChangeListener { _ -> }
     private var audioFocusRequest: Any? = null
 
     // Settings State
-    var aiProvider by mutableStateOf("ollama")
-    var geminiApiKey by mutableStateOf("")
-    var aiModel by mutableStateOf("")
-    var aiVoice by mutableStateOf("")
-    var availableModels = mutableStateListOf<String>()
-    var isLoadingModels by mutableStateOf(false)
-    var availableVoices = mutableStateListOf<String>()
-    var isLoadingVoices by mutableStateOf(false)
-    var userName by mutableStateOf("")
-    var userBio by mutableStateOf("")
-    var googleName by mutableStateOf("")
-    var useNativeStt by mutableStateOf(false)
-    var isNativeSttSupported by mutableStateOf(false)
-    var useLocalTts by mutableStateOf(false)
-    var passiveAssistant by mutableStateOf(false)
-    var micProfile by mutableStateOf("standard")
+    var aiProvider by SpeaxManager::aiProvider
+    var geminiApiKey by SpeaxManager::geminiApiKey
+    var aiModel by SpeaxManager::aiModel
+    var aiVoice by SpeaxManager::aiVoice
+    var availableModels by SpeaxManager::availableModels
+    var isLoadingModels by SpeaxManager::isLoadingModels
+    var availableVoices by SpeaxManager::availableVoices
+    var isLoadingVoices by SpeaxManager::isLoadingVoices
+    var userName by SpeaxManager::userName
+    var userBio by SpeaxManager::userBio
+    var googleName by SpeaxManager::googleName
+    var useNativeStt by SpeaxManager::useNativeStt
+    var isNativeSttSupported by SpeaxManager::isNativeSttSupported
+    var useLocalTts by SpeaxManager::useLocalTts
+    var passiveAssistant by SpeaxManager::passiveAssistant
+    var micProfile by SpeaxManager::micProfile
 
     // Memory & Thread State
-    var memorySummary by mutableStateOf("No summary generated yet.")
-    var activeThreadId by mutableStateOf("default")
-    var archiveTurns by mutableStateOf(0)
-    var maxArchiveTurns by mutableStateOf(100)
-    var estTokens by mutableStateOf(0)
-    var maxTokens by mutableStateOf(8192)
-    val tokenUsage = mutableStateMapOf<String, Long>()
-    var activeThreadName by mutableStateOf("General Chat")
-    val availableThreads = mutableStateListOf<ThreadItem>()
+    var memorySummary by SpeaxManager::memorySummary
+    var activeThreadId by SpeaxManager::activeThreadId
+    var archiveTurns by SpeaxManager::archiveTurns
+    var maxArchiveTurns by SpeaxManager::maxArchiveTurns
+    var estTokens by SpeaxManager::estTokens
+    var maxTokens by SpeaxManager::maxTokens
+    val tokenUsage = SpeaxManager.tokenUsage
+    var activeThreadName by SpeaxManager::activeThreadName
+    val availableThreads = SpeaxManager.availableThreads
 
     // Auth State
-    var sessionCookie by mutableStateOf<String?>(null)
+    var sessionCookie by SpeaxManager::sessionCookie
     private var wasSuccessfullyConnected = false
-    private var suppressNextConnectTone = false
-    private var suppressNextDisconnectTone = false
 
     // Native STT
     private var speechRecognizer: SpeechRecognizer? = null
@@ -151,20 +145,6 @@ class MainActivity : ComponentActivity() {
     private var isAppInForeground = false
     private var cpuWakeLock: PowerManager.WakeLock? = null
 
-    private lateinit var piperEngine: PiperEngine
-    private val piperMutex = Mutex() // Ensures we only synthesize one sentence at a time (saves CPU)
-
-    private val leadingCommaRe = Regex(",\\s+([A-Z])")
-    private val mdRe = Regex("[*_`#~]")
-    private val wsRe = Regex("\\s{2,}")
-
-    private fun sanitiseTTSText(text: String): String {
-        var processedText = text
-        processedText = leadingCommaRe.replace(processedText, " $1")
-        processedText = mdRe.replace(processedText, "")
-        processedText = wsRe.replace(processedText, " ")
-        return processedText.trim()
-    }
 	
 	private val serverUrl = "wss://speax.jakbox.dev/ws"
     private val authUrl = "https://speax.jakbox.dev/auth/login?client=android"
@@ -177,55 +157,18 @@ class MainActivity : ComponentActivity() {
         // Tell legacy Android to STOP resizing the window, letting Compose's .imePadding() do 100% of the work
         window.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
 
-        // Load saved session if it exists
-        val prefs = getSharedPreferences("speax_prefs", Context.MODE_PRIVATE)
-        sessionCookie = prefs.getString("session_cookie", null)
-        aiProvider = prefs.getString("provider", "ollama") ?: "ollama"
-        geminiApiKey = prefs.getString("api_key", "") ?: ""
-        aiModel = prefs.getString("model", "") ?: ""
-        aiVoice = prefs.getString("voice", "") ?: ""
-        userName = prefs.getString("user_name", "") ?: ""
-        userBio = prefs.getString("user_bio", "") ?: ""
-        googleName = prefs.getString("google_name", "") ?: ""
-        
-        isNativeSttSupported = SpeechRecognizer.isRecognitionAvailable(this)
-        useNativeStt = prefs.getBoolean("use_native_stt", isNativeSttSupported) // Default to true if hardware supports it
-        useLocalTts = prefs.getBoolean("use_local_tts", false)
-        passiveAssistant = prefs.getBoolean("passive_assistant", false)
-        micProfile = prefs.getString("mic_profile", "standard") ?: "standard"
-
-        // 0. Initialize Edge TTS Pipeline
-        piperEngine = PiperEngine(this)
-        lifecycleScope.launch(Dispatchers.IO) {
-            piperEngine.initEngine()
-        }
-
-        // 1. Initialize Audio Engine
-        audioEngine = AudioEngine(onSpeechFinalized = { _, _ -> }, onVolumeChange = { rms ->
-            // Pass RMS back to UI thread for Visualizer scaling
-            if (isAppInForeground) runOnUiThread { currentRms = rms }
-        }, onSpeechStart = {
-            // Instant UI feedback that VAD tripped
-            runOnUiThread { statusText = "Recording (Speaking)..." }
-        }, onAiVolumeChange = { rms ->
-            if (isAppInForeground) runOnUiThread { aiRms = rms }
-        }, onBufferProgress = { progress ->
-            if (isAppInForeground) runOnUiThread { playbackProgress = progress }
-        }, onPlaybackComplete = {
-            speaxWebSocket?.sendText("[PLAYBACK_COMPLETE]")
-        }, onStreamingChunk = { pcmData, seqID, type ->
-            speaxWebSocket?.sendStreamingChunk(type, seqID, pcmData)
-            if (type == 0x02.toByte()) {
-                runOnUiThread { statusText = "Processing with AI..." }
-            }
-        })
-        audioEngine.micProfile = micProfile
+        // Initialize SpeaxManager
+        SpeaxManager.init(this)
 
         // 2. Request Mic & Notification Permissions
         val requestPermissionLauncher = registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
         ) { permissions ->
-            if (permissions[Manifest.permission.RECORD_AUDIO] == false) {
+            if (permissions[Manifest.permission.RECORD_AUDIO] == true) {
+                if (sessionCookie != null && !isConnected) {
+                    connectWebSocket()
+                }
+            } else {
                 statusText = "Mic permission denied!"
             }
         }
@@ -244,16 +187,16 @@ class MainActivity : ComponentActivity() {
 
         // 3. Auto-connect if we have a session
         if (sessionCookie != null) {
-            connectWebSocket()
+            // Only auto-connect if we already have permission.
+            // If not, the permission callback above will trigger it after the user grants it.
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                connectWebSocket()
+            }
         }
 		
 		// Register the local receiver so we can use mute/playpause hardware
 	    val filter = IntentFilter("SPEAX_HARDWARE_BTN")
-	    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-	        registerReceiver(hardwareButtonReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-	    } else {
-	        registerReceiver(hardwareButtonReceiver, filter)
-	    }
+	    ContextCompat.registerReceiver(this, hardwareButtonReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
 	        // 3. Render UI
         setContent {
             SpeaxTheme {
@@ -310,24 +253,6 @@ class MainActivity : ComponentActivity() {
         } else {
             window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
-
-        // CPU wake: keep the CPU alive whenever mic is recording (even if screen is off)
-        if (micActive) {
-            if (cpuWakeLock == null) {
-                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                cpuWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "speax:mic_active")
-                cpuWakeLock?.acquire()
-                Log.d("WakeLock", "PARTIAL_WAKE_LOCK acquired")
-            }
-        } else {
-            cpuWakeLock?.let {
-                if (it.isHeld) {
-                    it.release()
-                    Log.d("WakeLock", "PARTIAL_WAKE_LOCK released")
-                }
-            }
-            cpuWakeLock = null
-        }
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -356,24 +281,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateBackgroundService() {
-	    val intent = Intent(this, SpeaxService::class.java)
+	    // Background service is now managed centrally by SpeaxManager.connect() / disconnect()
+	    // We just trigger a state update for the notification if needed
 	    if (isConnected) {
-	        intent.action = "START"
-	        // Pass the token to the background service
-	        mediaSession?.sessionToken?.let { token ->
-	            intent.putExtra("session_token", token)
-	        }
-	        // Pass the current mute/pause state to the notification
-	        intent.putExtra("is_muted", isMicMuted || isAiPaused)
-	        
-	        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-	            startForegroundService(intent)
-	        } else {
-	            startService(intent)
-	        }
-	    } else {
-	        intent.action = "STOP"
-	        startService(intent)
+            val intent = Intent(this, SpeaxService::class.java).apply {
+                action = "START"
+                mediaSession?.sessionToken?.let { putExtra("session_token", it) }
+                putExtra("is_muted", isMicMuted || isAiPaused)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
 	    }
 	}
 
@@ -585,456 +501,54 @@ class MainActivity : ComponentActivity() {
     }
 
     fun saveSettingsLocal() {
-        getSharedPreferences("speax_prefs", Context.MODE_PRIVATE).edit().apply {
-            putString("provider", aiProvider)
-            putString("api_key", geminiApiKey)
-            putString("model", aiModel)
-            putString("voice", aiVoice)
-            putString("user_name", userName)
-            putString("user_bio", userBio)
-            putString("google_name", googleName)
-            putBoolean("use_native_stt", useNativeStt)
-            putBoolean("use_local_tts", useLocalTts)
-            putBoolean("passive_assistant", passiveAssistant)
-        }.apply()
-	}
+        SpeaxManager.saveSettingsLocal()
+    }
 
 	fun pushSettingsToServer() {
-        saveSettingsLocal()
-        val settingsJson = JSONObject().apply {
-            put("userName", userName)
-            put("googleName", googleName)
-            put("userBio", userBio)
-            put("provider", aiProvider)
-            put("apiKey", geminiApiKey)
-            put("model", aiModel)
-            put("voice", aiVoice)
-            put("clientStorage", false)
-            put("clientTts", useLocalTts)
-            put("passiveAssistant", passiveAssistant)
-        }
-        speaxWebSocket?.sendText("[SETTINGS]$settingsJson")
+        SpeaxManager.pushSettingsToServer()
     }
 
     fun fetchModels() {
-        if (aiProvider == "gemini" && geminiApiKey.isBlank()) {
-            availableModels.clear()
-            return
-        }
-        isLoadingModels = true
-        val url = "https://speax.jakbox.dev/api/models?provider=$aiProvider&apiKey=$geminiApiKey"
-        
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                val request = Request.Builder().url(url).build()
-                val response = httpClient.newCall(request).execute()
-                if (response.isSuccessful) {
-                    val jsonStr = response.body?.string() ?: "[]"
-                    val jsonArray = org.json.JSONArray(jsonStr)
-                    val models = mutableListOf<String>()
-                    for (i in 0 until jsonArray.length()) {
-                        models.add(jsonArray.getJSONObject(i).getString("id"))
-                    }
-                    withContext(Dispatchers.Main) {
-                        availableModels.clear()
-                        availableModels.addAll(models)
-                    }
-                }
-            } catch (e: Exception) { Log.e("MainActivity", "Error fetching models", e) }
-            finally { withContext(Dispatchers.Main) { isLoadingModels = false } }
-        }
+        SpeaxManager.fetchModels()
     }
     
     fun fetchVoices() {
-        val isLocal = useLocalTts // Capture state synchronously before background thread
-        Log.d("SpeaxVoices", "fetchVoices triggered! isLocalTTS=$isLocal")      
-        isLoadingVoices = true
-        
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                val voices = mutableListOf<String>()
-                
-                if (isLocal) {
-                    // Wait for PiperEngine to finish extracting assets on first boot!
-                    var retries = 0
-                    while (!piperEngine.isReady && retries < 40) {
-                        kotlinx.coroutines.delay(250)
-                        retries++
-                    }
-
-                    // Recursively scan local device storage for .onnx models
-                    val piperDir = File(filesDir, "piper_env")
-                    val onnxFiles = piperDir.walkTopDown()
-                        .filter { it.isFile && it.name.endsWith(".onnx") }
-                        .toList()
-					Log.d("SpeaxVoices", "Local scan complete. Found ${onnxFiles.size} models: ${onnxFiles.map { it.name }}")
-                    voices.addAll(onnxFiles.map { it.name.replace(".onnx", "") }.distinct())
-                } else {
-                    Log.d("SpeaxVoices", "Fetching remote models from server...")
-                    // Fetch available models from the remote Go Server
-                    val url = "https://speax.jakbox.dev/api/voices"
-                    val request = Request.Builder().url(url).build()
-                    val response = httpClient.newCall(request).execute()
-                    if (response.isSuccessful) {
-                        val jsonStr = response.body?.string() ?: "[]"
-                        val jsonArray = org.json.JSONArray(jsonStr)
-                        for (i in 0 until jsonArray.length()) {
-                            voices.add(jsonArray.getString(i).replace(".onnx", ""))
-                        }
-                    }
-                }
-                
-                withContext(Dispatchers.Main) {
-                    availableVoices.clear()
-                    availableVoices.addAll(voices)
-                }
-            } catch (e: Exception) { Log.e("MainActivity", "Error fetching voices", e) }
-            finally { withContext(Dispatchers.Main) { isLoadingVoices = false } }
-        }
+        SpeaxManager.fetchVoices()
     }
 
     fun toggleConnection() {
         if (isConnected) {
-            suppressNextDisconnectTone = true
             disconnectWebSocket()
         } else {
-            suppressNextConnectTone = true
             connectWebSocket()
         }
     }
 
     private fun connectWebSocket() {
-        // Force Android into VoIP mode to enable the aggressive hardware echo cancellation 
-        // and noise suppression typically reserved for phone calls (matching Chrome WebRTC).
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-
-        // Request Audio Focus to guarantee our MediaSession receives hardware button events
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val request = android.media.AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                .setAudioAttributes(
-                    android.media.AudioAttributes.Builder()
-                        .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .setOnAudioFocusChangeListener(focusChangeListener)
-                .build()
-            audioFocusRequest = request
-            audioManager.requestAudioFocus(request)
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.requestAudioFocus(focusChangeListener, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN)
-        }
-
-        // Force audio routing to Bluetooth Headset mic if available!
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val devices = audioManager.availableCommunicationDevices
-            val btDevice = devices.firstOrNull { 
-                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || it.type == AudioDeviceInfo.TYPE_BLE_HEADSET 
-            }
-            if (btDevice != null) {
-                audioManager.setCommunicationDevice(btDevice)
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.startBluetoothSco()
-            @Suppress("DEPRECATION")
-            audioManager.isBluetoothScoOn = true
-        }
-
-        // Acquire Partial WakeLock to keep CPU running for continuous STT
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK,
-            "Speax::AudioLock"
-        ).apply { acquire() }
-
-        val deviceName = java.net.URLEncoder.encode("${Build.MANUFACTURER} ${Build.MODEL}", "UTF-8")
-        val fullUrl = "$serverUrl?client=android&device=$deviceName"
-
-        statusText = "Connecting..."
-        
-        // Ensure only one connection exists: explicitly disconnect any lingering socket
-        speaxWebSocket?.disconnect()
-        
-        val newSocket = SpeaxWebSocket(
-            url = fullUrl,
-            cookie = sessionCookie ?: "",
-            onTextReceived = { socket, text ->
-                if (speaxWebSocket == socket) {
-                    handleIncomingText(text)
-                }
-            },
-            onAudioReceived = { socket, audioBytes ->
-                if (speaxWebSocket == socket) {
-                    Log.d("SpeaxClient", "RX Audio: ${audioBytes.size} bytes")
-                    audioEngine.playAudioChunk(audioBytes)
-                }
-            },
-            onConnected = { socket ->
-                if (speaxWebSocket == socket) {
-                    wasSuccessfullyConnected = true
-                    if (!suppressNextConnectTone) {
-                        notificationSounds.playConnect()
-                    }
-                    suppressNextConnectTone = false
-                }
-            },
-            onClosed = { socket ->
-                if (speaxWebSocket == socket) {
-                    if (wasSuccessfullyConnected) {
-                        if (!suppressNextDisconnectTone) {
-                            notificationSounds.playDisconnect()
-                        }
-                        wasSuccessfullyConnected = false
-                        suppressNextDisconnectTone = false
-                    }
-                    if (isConnected) {
-                        attemptReconnect()
-                    }
-                }
-            }
-        )
-        speaxWebSocket = newSocket
-        newSocket.connect()
+        SpeaxManager.connect(mediaSession?.sessionToken)
         
         // Ask the Go server for the latest settings, threads, and history
-        // The server is the single source of truth for cross-device sessions
-        speaxWebSocket?.sendText("[REQUEST_SYNC]")
-
-        isConnected = true
+        SpeaxManager.sendTextPrompt("[REQUEST_SYNC]")
 
         if (useNativeStt) {
             restartNativeListening()
-        } else {
-            audioEngine.startRecording()
-        }
-        statusText = "Listening..."
+        } 
         updateBackgroundService()
         mediaSession?.isActive = true
         updateMediaSessionState()
-        updateWakeLocks()
     }
 
-    private var retryCount = 0
-    private fun attemptReconnect() {
-        lifecycleScope.launch(Dispatchers.Main) {
-            val delayMs = minOf(1000L * (1 shl retryCount), 5000L)
-            statusText = "Disconnected. Retrying in ${delayMs / 1000}s..."
-            
-            kotlinx.coroutines.delay(delayMs)
-            
-            if (isConnected) {
-                retryCount++
-                connectWebSocket()
-            }
-        }
-    }
-
-    private fun handleIncomingText(text: String) {
-        try {
-            when {
-                text.startsWith("[HISTORY]") -> {
-                    val payload = JSONObject(text.removePrefix("[HISTORY]"))
-                    val archiveArr = payload.optJSONArray("archive")
-                    val historyArr = payload.optJSONArray("history")
-                    val parsedMessages = mutableListOf<UiMessage>()
-                    
-                    if (archiveArr != null) {
-                        for (i in 0 until archiveArr.length()) {
-                            val msg = archiveArr.getJSONObject(i)
-                            parsedMessages.add(UiMessage(msg.getString("role"), msg.getString("content")))
-                        }
-                    }
-                    
-                    if (historyArr != null) {
-                        for (i in 0 until historyArr.length()) {
-                            val msg = historyArr.getJSONObject(i)
-                            parsedMessages.add(UiMessage(msg.getString("role"), msg.getString("content")))
-                        }
-                    }
-                    runOnUiThread {
-                        messages.clear()
-                        messages.addAll(parsedMessages)
-                    }
-                }
-                text.startsWith("[SETTINGS_SYNC]") -> {
-                    val s = JSONObject(text.removePrefix("[SETTINGS_SYNC]"))
-                    if (s.has("provider")) {
-                        val p = s.optString("provider", "ollama")
-                        val un = s.optString("userName", "")
-                        val gn = s.optString("googleName", googleName)
-                        val ub = s.optString("userBio", "")
-                        val key = s.optString("apiKey", geminiApiKey)
-                        val mod = s.optString("model", "")
-                        val v = s.optString("voice", "")
-                        val tu = s.optJSONObject("tokenUsage")
-                        runOnUiThread {
-                            aiProvider = p
-                            userName = un
-                            googleName = gn
-                            userBio = ub
-                            geminiApiKey = key
-                            aiModel = mod
-                            aiVoice = v
-                            tokenUsage.clear()
-                            if (tu != null) {
-                                val keys = tu.keys()
-                                while (keys.hasNext()) {
-                                    val k = keys.next()
-                                    tokenUsage[k] = tu.optLong(k, 0L)
-                                }
-                            }
-                            saveSettingsLocal()
-                            fetchModels()
-                            fetchVoices() 
-                        }
-                    }
-                }
-                text.startsWith("[TTS_CHUNK]") -> {
-                    val chunk = sanitiseTTSText(text.removePrefix("[TTS_CHUNK]"))
-                    if (useLocalTts && chunk.isNotBlank()) {
-                        lifecycleScope.launch(Dispatchers.IO) {
-                            piperMutex.withLock {
-                                val audioBytes = piperEngine.synthesize(chunk, aiVoice)
-                                if (audioBytes != null && audioBytes.isNotEmpty()) {
-                                    audioEngine.playAudioChunk(audioBytes)
-                                }
-                            }
-                        }
-                    }
-                }
-                text.startsWith("[SUMMARY]") -> {
-                    var parsedSummary: String
-                    var pArchive = 0
-                    var pMaxArchive = 100
-                    var pEstTokens = 0
-                    var pMaxTokens = 8192
-                    try {
-                        val s = JSONObject(text.removePrefix("[SUMMARY]"))
-                        parsedSummary = s.optString("text", "No summary generated yet.")
-                        pArchive = s.optInt("archiveTurns", 0)
-                        pMaxArchive = s.optInt("maxArchiveTurns", 250)
-                        pEstTokens = s.optInt("estTokens", 0)
-                        pMaxTokens = s.optInt("maxTokens", 8192)
-                    } catch (e: Exception) {
-                        parsedSummary = text.removePrefix("[SUMMARY]")
-                    }
-                    runOnUiThread { 
-                        memorySummary = parsedSummary
-                        archiveTurns = pArchive
-                        maxArchiveTurns = pMaxArchive
-                        estTokens = pEstTokens
-                        maxTokens = pMaxTokens
-                    }
-                }
-                text.startsWith("[THREADS_SYNC]") -> {
-                    val s = JSONObject(text.removePrefix("[THREADS_SYNC]"))
-                    val parsedActiveId = s.optString("activeId", "default")
-                    val threadsArr = s.optJSONArray("threads")
-                    val parsedThreads = mutableListOf<ThreadItem>()
-                    var parsedActiveName = "General Chat"
-                    if (threadsArr != null) {
-                        for (i in 0 until threadsArr.length()) {
-                            val t = threadsArr.getJSONObject(i)
-                            val id = t.optString("id")
-                            val name = t.optString("name", "General Chat")
-                            parsedThreads.add(ThreadItem(id, name))
-                            if (id == parsedActiveId) {
-                                parsedActiveName = name
-                            }
-                        }
-                    }
-                    runOnUiThread {
-                        activeThreadId = parsedActiveId
-                        activeThreadName = parsedActiveName
-                        availableThreads.clear()
-                        availableThreads.addAll(parsedThreads)
-                    }
-                }
-                text == "[AI_START]" -> {
-                    runOnUiThread {
-                        isGeneratingAi = true
-                        isAiPaused = false // Resync UI: The AI is speaking a new thought
-                        messages.add(UiMessage("assistant", ""))
-                        statusText = "Alyx is speaking..."
-                    }
-                }
-                text == "[AI_END]" -> {
-                    runOnUiThread {
-                        isGeneratingAi = false
-                        isAiPaused = false
-                        statusText = "Listening..."
-                    }
-                }
-                text.startsWith("[CHAT]:") -> {
-                    val content = text.removePrefix("[CHAT]:").trim()
-                    if (content.isNotBlank()) {
-                        audioEngine.abortPlayback() // Sync execution on WebSocket thread to avoid race with incoming audio chunks
-                        runOnUiThread {
-                            isAiPaused = false // Resync UI
-                            messages.add(UiMessage("user", content))
-                            // Ensure it scrolls to bottom (handled by LaunchedEffect normally)
-                        }
-                    }
-                }
-                text == "[IGNORED]" -> {
-                    runOnUiThread {
-                        statusText = "Listening..."
-                        isAiPaused = false // Resync UI: Whisper rejected the barge-in, hardware resumed
-                        audioEngine.resumePlayback() // Whisper said it was just noise, resume the paused TTS!
-                    }
-                }
-                text.startsWith("(") -> {
-                    // Ignore other annotations like (keyboard clicking), (clapping), etc
-                    runOnUiThread {
-                        statusText = "Listening..."
-                        isAiPaused = false // Resync UI: Whisper rejected the barge-in, hardware resumed
-                        audioEngine.resumePlayback() // Whisper said it was just noise, resume the paused TTS!
-                    }
-                }
-                text.startsWith("[") -> {
-                    // Ignore other system sync messages like [SUMMARY], [SETTINGS], [THREADS] for now
-                }
-                else -> {
-                    if (!isGeneratingAi && text.isNotBlank()) {
-                        audioEngine.abortPlayback() // We successfully barged in, nuke the old audio queue
-                    }
-                    runOnUiThread {
-                        if (isGeneratingAi) {
-                            // Append token to the last AI message for typewriter effect
-                            val lastMsg = messages.lastOrNull()
-                            if (lastMsg != null && lastMsg.role == "assistant") {
-                                messages[messages.lastIndex] = lastMsg.copy(content = lastMsg.content + text)
-                            }
-                        } else if (text.isNotBlank()) {
-                            // It's the transcribed User text
-                            isAiPaused = false // Resync UI
-                            messages.add(UiMessage("user", text.trim()))
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Error parsing WebSocket text", e)
-        }
-    }
 
     fun toggleMicMute() {
-        isMicMuted = !isMicMuted
+        SpeaxManager.toggleMicMute()
         Log.d("SpeaxUI", "Mic Muted State: $isMicMuted")
         
         if (useNativeStt) {
             if (isMicMuted) {
                 stopNativeListening()
-                statusText = "Muted"
             } else {
                 restartNativeListening()
             }
-        } else {
-            audioEngine.isMicMuted = isMicMuted
-            if (isMicMuted) audioEngine.forceEndStreaming()
         }
         
         updateBackgroundService()
@@ -1042,93 +556,35 @@ class MainActivity : ComponentActivity() {
     }
 
     fun toggleAiPause() {
-        isAiPaused = !isAiPaused
+        Log.d("SpeaxUI", "toggleAiPause: currently isAiPaused=$isAiPaused")
+        SpeaxManager.toggleAiPause()
+        
+        // Match the legacy behavior where pausing mutes the mic
         if (isAiPaused) {
-            speaxWebSocket?.sendText("[PAUSE]")
-            audioEngine.suspendPlayback()
             isMicMuted = true
             audioEngine.isMicMuted = true
-            audioEngine.forceEndStreaming()
             if (useNativeStt) stopNativeListening()
         } else {
-            speaxWebSocket?.sendText("[RESUME]")
-            audioEngine.resumePlayback()
             isMicMuted = false
             audioEngine.isMicMuted = false
             if (useNativeStt) restartNativeListening()
-            else audioEngine.startRecording()
         }
+
         updateBackgroundService()
         updateMediaSessionState()
         updateWakeLocks()
     }
 
-    fun switchThread(id: String) { speaxWebSocket?.sendText("[SWITCH_THREAD]:$id") }
-    fun deleteThread(id: String) { speaxWebSocket?.sendText("[DELETE_THREAD]:$id") }
-    fun newThread(name: String) { speaxWebSocket?.sendText("[NEW_THREAD]:$name") }
-    fun renameThread(name: String) { speaxWebSocket?.sendText("[RENAME_THREAD]:$name") }
-    fun sendTextPrompt(text: String) { speaxWebSocket?.sendText("[TEXT_PROMPT:${System.currentTimeMillis()}]:$text") }
-    fun sendTypedPrompt(text: String) { speaxWebSocket?.sendText("[TYPED_PROMPT:${System.currentTimeMillis()}]:$text") }
-    fun deleteMessagePair(index: Int) {
-        speaxWebSocket?.sendText("[DELETE_MSG]:$index")
-        // Optimistically remove from local UI instantly for a snappy feel
-        if (index in messages.indices) {
-            messages.removeAt(index) // Remove User prompt
-            if (index < messages.size && messages[index].role == "assistant") {
-                messages.removeAt(index) // Remove subsequent AI response
-            }
-        }
-    }
-
-    fun clearHistory() {
-        speaxWebSocket?.sendText("[CLEAR_HISTORY]")
-        messages.clear()
-        memorySummary = "No summary generated yet."
-    }
-
-    fun rebuildSummary() {
-        speaxWebSocket?.sendText("[REBUILD_SUMMARY]")
-    }
 
     private fun disconnectWebSocket() {
-        speaxWebSocket?.disconnect()
-        speaxWebSocket = null
+        SpeaxManager.disconnect()
         audioEngine.abortPlayback()
         stopNativeListening()
         audioEngine.stopRecording()
-        isConnected = false
-        statusText = "Disconnected"
-        updateBackgroundService()
         mediaSession?.isActive = false
         updateMediaSessionState()
         updateWakeLocks()
 
-        // Release the audio focus back to normal so standard media apps don't sound muffled
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            audioManager.clearCommunicationDevice()
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.isBluetoothScoOn = false
-            @Suppress("DEPRECATION")
-            audioManager.stopBluetoothSco()
-        }
-        audioManager.mode = AudioManager.MODE_NORMAL
-
-        // Release Audio Focus
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            (audioFocusRequest as? android.media.AudioFocusRequest)?.let {
-                audioManager.abandonAudioFocusRequest(it)
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.abandonAudioFocus(focusChangeListener)
-        }
-
-        // Release WakeLock
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
     }
     
     fun logout() {
@@ -1137,6 +593,17 @@ class MainActivity : ComponentActivity() {
         CookieManager.getInstance().removeAllCookies(null)
         sessionCookie = null
     }
+
+    fun switchThread(id: String) = SpeaxManager.switchThread(id)
+    fun deleteThread(id: String) = SpeaxManager.deleteThread(id)
+    fun newThread(name: String) = SpeaxManager.newThread(name)
+    fun renameThread(name: String) = SpeaxManager.renameThread(name)
+    fun sendTextPrompt(text: String) = SpeaxManager.sendTextPrompt(text)
+    fun sendTypedPrompt(text: String) = SpeaxManager.sendTypedPrompt(text)
+    fun deleteMessage(index: Int) = SpeaxManager.deleteMessage(index)
+    fun deleteMessagePair(index: Int) = SpeaxManager.deleteMessagePair(index)
+    fun clearHistory() = SpeaxManager.clearHistory()
+    fun rebuildSummary() = SpeaxManager.rebuildSummary()
 
     override fun onDestroy() {
         super.onDestroy()
@@ -1149,167 +616,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-class PiperEngine(private val context: Context) {
-    private val piperDir = File(context.filesDir, "piper_env")
-    
-    private var tts: OfflineTts? = null
-    private var currentVoice: String = ""
 
-    var isReady = false
-        private set
-
-    fun initEngine() {
-        try {
-            // Extract the contents of assets/piper/ to filesDir/piper_env/
-            copyAssetFolder(context.assets, "piper", piperDir.absolutePath)
-            isReady = true
-            Log.d("PiperEngine", "Local Piper Engine initialized successfully.")
-        } catch (e: Exception) {
-            Log.e("PiperEngine", "Failed to initialize Piper", e)
-        }
-    }
-
-    private fun copyAssetFolder(assetManager: android.content.res.AssetManager, fromAssetPath: String, toPath: String) {
-        val file = File(toPath)
-        val assets = assetManager.list(fromAssetPath) ?: return
-        
-        if (assets.isEmpty()) {
-            // It's a file, copy it
-            if (!file.exists() || file.length() == 0L) {
-                file.parentFile?.mkdirs()
-                assetManager.open(fromAssetPath).use { inputStream ->
-                    file.outputStream().use { outputStream ->
-                        inputStream.copyTo(outputStream)
-                    }
-                }
-            }
-        } else {
-            // It's a directory, create it and recurse
-            file.mkdirs()
-            for (asset in assets) {
-                copyAssetFolder(assetManager, "$fromAssetPath/$asset", "$toPath/$asset")
-            }
-        }
-    }
-
-    fun synthesize(text: String, voice: String): ByteArray? {
-        if (!isReady || text.isBlank()) return null
-        try {
-            Log.d("SpeaxLocalTTS", "Attempting to synthesize chunk locally: '$text'")
-            
-            val modelName = if (voice.isNotBlank()) voice else "en_GB-alba-medium.onnx"
-            val modelFile = piperDir.walkTopDown().firstOrNull { it.isFile && it.name == modelName }
-            
-            if (modelFile == null) {
-                Log.e("SpeaxLocalTTS", "Model file not found locally: $modelName")
-                return null
-            }
-            
-            // Check alongside the model first, fallback to root if needed
-            var espeakDataDir = File(modelFile.parentFile, "espeak-ng-data")
-            if (!espeakDataDir.exists() || !espeakDataDir.isDirectory) {
-                espeakDataDir = File(piperDir, "espeak-ng-data")
-            }
-            if (!espeakDataDir.exists() || !espeakDataDir.isDirectory) {
-                Log.e("SpeaxLocalTTS", "CRITICAL FATAL: espeak-ng-data folder not found! C++ Engine will crash. Aborting.")
-                return null
-            }
-            
-            val phondataFile = File(espeakDataDir, "phondata")
-            if (!phondataFile.exists() || phondataFile.length() == 0L) {
-                Log.e("SpeaxLocalTTS", "CRITICAL FATAL: espeak-ng-data/phondata is missing or empty! Extraction failed. Aborting.")
-                return null
-            }
-
-            // Initialize or swap models dynamically!
-            if (tts == null || currentVoice != voice) {
-                tts?.release()
-                
-                // Sherpa models come with their own perfect tokens.txt file!
-                val tokensFile = File(modelFile.parentFile, "tokens.txt")
-                
-                if (!tokensFile.exists() || tokensFile.length() == 0L) {
-                    Log.e("SpeaxLocalTTS", "CRITICAL FATAL: tokens.txt is missing from the model directory! Aborting.")
-                    return null
-                }
-                
-                Log.d("SpeaxLocalTTS", "JNI INIT: Model=${modelFile.absolutePath} (Size: ${modelFile.length()} bytes)")
-                Log.d("SpeaxLocalTTS", "JNI INIT: Tokens=${tokensFile.absolutePath} (Size: ${tokensFile.length()} bytes)")
-                Log.d("SpeaxLocalTTS", "JNI INIT: DataDir=${espeakDataDir.absolutePath} (phondata Size: ${phondataFile.length()} bytes)")
-
-                val config = OfflineTtsConfig(
-                    model = OfflineTtsModelConfig(
-                        vits = OfflineTtsVitsModelConfig(
-                            model = modelFile.absolutePath,
-                            lexicon = "", // Not needed for espeak Piper models
-                            tokens = if (tokensFile.exists()) tokensFile.absolutePath else "",
-                            dataDir = espeakDataDir.parentFile?.absolutePath ?: piperDir.absolutePath, 
-                            noiseScale = 0.667f,
-                            noiseScaleW = 0.8f,
-                            lengthScale = 1.0f
-                        ),
-                        numThreads = 1,
-                        debug = true, // Force C++ Engine to print to Logcat!
-                        provider = "cpu"
-                    )
-                )
-                Log.d("SpeaxLocalTTS", "JNI INIT: Calling OfflineTts constructor...")
-                tts = OfflineTts(config = config)
-                Log.d("SpeaxLocalTTS", "JNI INIT: Constructor successful!")
-                currentVoice = voice
-            }
-            
-            Log.d("SpeaxLocalTTS", "JNI GENERATE: Sending text to C++ engine...")
-            val audio = tts?.generate(text) ?: return null
-            Log.d("SpeaxLocalTTS", "JNI GENERATE: C++ engine returned audio successfully!")
-
-            val samples = audio.samples
-            val pcmBytes = ByteArray(samples.size * 2)
-            for (i in samples.indices) {
-                var sample = (samples[i] * 32767.0f).toInt()
-                sample = sample.coerceIn(-32768, 32767)
-                pcmBytes[i * 2] = (sample and 0xFF).toByte()
-                pcmBytes[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
-            }
-            
-            Log.d("SpeaxLocalTTS", "Success! Generated ${pcmBytes.size} bytes of audio.")
-            return pcmBytes
-        } catch (e: Exception) {
-            Log.e("SpeaxLocalTTS", "Synthesis crashed unexpectedly: ${e.message}", e)
-            return null
-        }
-    }
-}
-
-private val DarkColors = darkColorScheme(
-    background = Color(0xFF030B17),      // Slate Deep (Depressed/Shadows)
-    surface = Color(0xFF0B1E36),         // Slate Mid (Cards/Surfaces)
-    surfaceVariant = Color(0xFF152E4D),  // Slate High (Active Elements/Borders)
-    primary = Color(0xFF0E639C),
-    secondary = Color(0xFF00D1C1),
-    onBackground = Color.White,
-    onSurface = Color.White,
-    outline = Color(0xFF152E4D)
-)
-
-private val LightColors = lightColorScheme(
-    background = Color(0xFFF5F5F5),
-    surface = Color(0xFFFFFFFF),
-    surfaceVariant = Color(0xFFE0E0E0),
-    primary = Color(0xFF0E639C),
-    secondary = Color(0xFF007A5E), // Darker green for contrast on light mode
-    onBackground = Color(0xFF1E1E1E),
-    onSurface = Color(0xFF1E1E1E),
-    outline = Color.LightGray
-)
-
-@Composable
-fun SpeaxTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = if (darkTheme) DarkColors else LightColors,
-        content = content
-    )
-}
 
 @Composable
 fun LoginScreen(authUrl: String) {
@@ -1426,19 +733,8 @@ fun ChatScreen() {
                                 DropdownMenuItem(
                                     text = { Text(label) },
                                     onClick = {
-                                        mainActivity.micProfile = value
-                                        mainActivity.getSharedPreferences("speax_prefs", Context.MODE_PRIVATE).edit().putString("mic_profile", value).apply()
-                                        mainActivity.audioEngine.micProfile = value
+                                        SpeaxManager.updateMicProfile(value)
                                         expandedMicDropdown = false
-                                        // If using heavy, sensitive, or standard, we need to restart the engine to apply new AudioSource/FX
-                                        if (value == "heavy" || mainActivity.micProfile == "heavy" || 
-                                            value == "sensitive" || mainActivity.micProfile == "sensitive" ||
-                                            value == "standard" || mainActivity.micProfile == "standard") {
-                                            if (!mainActivity.isMicMuted) {
-                                                mainActivity.audioEngine.stopRecording()
-                                                mainActivity.audioEngine.startRecording()
-                                            }
-                                        }
                                     }
                                 )
                             }
@@ -1478,7 +774,7 @@ fun ChatScreen() {
                     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text("Passive Assistant", color = MaterialTheme.colorScheme.onSurface)
-                            Text("Only responds when addressed by name (e.g. Alyx)", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
+                            Text("Only responds when addressed by name (e.g. ${SpeaxManager.assistantName})", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
                         }
                         Switch(
                             checked = mainActivity.passiveAssistant,
@@ -1563,7 +859,7 @@ fun ChatScreen() {
                         onExpandedChange = { expandedVoiceDropdown = !expandedVoiceDropdown }
                     ) {
                         OutlinedTextField(
-                            value = if (mainActivity.isLoadingVoices) "Loading..." else if (mainActivity.aiVoice.isBlank()) "Select Voice" else mainActivity.aiVoice,
+                            value = if (mainActivity.isLoadingVoices) "Loading..." else if (mainActivity.aiVoice.isBlank()) "Select Voice" else SpeaxManager.cleanVoiceName(mainActivity.aiVoice),
                             onValueChange = { },
                             readOnly = true,
                             label = { Text("Voice") },
@@ -1579,7 +875,7 @@ fun ChatScreen() {
                             } else {
                                 mainActivity.availableVoices.forEach { selectionOption ->
                                     DropdownMenuItem(
-                                        text = { Text(selectionOption) },
+                                        text = { Text(SpeaxManager.cleanVoiceName(selectionOption)) },
                                         onClick = {
                                             mainActivity.aiVoice = "$selectionOption.onnx"
                                             //mainActivity.saveSettings()

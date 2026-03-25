@@ -98,7 +98,7 @@ fun MessageBubble(msg: UiMessage, index: Int, isRecent: Boolean, mainActivity: M
                 .clickable { userExpanded = !userExpanded }
         ) {
             Text(
-                text = if (isAi) "Alyx: ${msg.content}" else if (!isSystem) "User: ${msg.content}" else "[System]: ${msg.content}",
+                text = if (isAi) "${SpeaxManager.assistantName}: ${msg.content}" else if (!isSystem) "User: ${msg.content}" else "[System]: ${msg.content}",
                 color = if (isSystem) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f) else if (isAi) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 fontSize = if (isSystem) 12.sp else 16.sp,
                 fontWeight = if (isAi) FontWeight.Bold else FontWeight.Normal,

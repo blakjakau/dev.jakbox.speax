@@ -41,7 +41,7 @@ class SpeaxService : Service() {
 
         // 2. Build notification with MediaStyle
         val title = if (isMuted) "Speax is Muted" else "Speax is Listening"
-        val text = if (isMuted) "Tap to unmute or resume Alyx." else "Alyx is running in the background."
+        val text = if (isMuted) "Tap to unmute or resume ${SpeaxManager.assistantName}." else "${SpeaxManager.assistantName} is running in the background."
         val icon = if (isMuted) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_btn_speak_now
 
         val builder = Notification.Builder(this, CHANNEL_ID)

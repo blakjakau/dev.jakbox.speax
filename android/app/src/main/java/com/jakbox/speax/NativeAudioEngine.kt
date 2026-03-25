@@ -28,6 +28,7 @@ class NativeAudioEngine(
     external fun forceEndStreaming(ptr: Long)
     external fun setMicProfile(ptr: Long, profile: String)
     external fun setThreshold(ptr: Long, threshold: Double)
+    external fun setPlaybackActive(ptr: Long, active: Boolean)
     external fun setMuted(ptr: Long, muted: Boolean)
 
     // Bridge for startRecording without passing ptr every time
@@ -36,6 +37,7 @@ class NativeAudioEngine(
     fun forceEndStreaming() = forceEndStreaming(nativePtr)
     fun setProfile(profile: String) = setMicProfile(nativePtr, profile)
     fun setThreshold(threshold: Double) = setThreshold(nativePtr, threshold)
+    fun setPlaybackActive(active: Boolean) = setPlaybackActive(nativePtr, active)
     fun setMuted(muted: Boolean) = setMuted(nativePtr, muted)
 
     // This will be called by native code

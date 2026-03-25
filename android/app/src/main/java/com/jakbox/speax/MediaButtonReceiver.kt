@@ -14,6 +14,7 @@ class MediaButtonReceiver : BroadcastReceiver() {
         // Only trigger on the button release to prevent double-firing
         if (keyEvent.action == KeyEvent.ACTION_UP) {
             val localIntent = Intent("SPEAX_HARDWARE_BTN").apply {
+                setPackage(context.packageName)
                 putExtra("keycode", keyEvent.keyCode)
             }
             // Fire an internal broadcast that MainActivity can catch

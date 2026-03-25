@@ -34,6 +34,7 @@ public:
         std::lock_guard<std::mutex> lock(vadMutex);
         profile = newProfile; 
     }
+    void setPlaybackActive(bool active) { isPlaybackActive.store(active); }
     std::string getMicProfile() {
         std::lock_guard<std::mutex> lock(vadMutex);
         return profile;
@@ -46,6 +47,7 @@ private:
     int sampleRate;
     int frameSizeSamples;
     std::atomic<double> noiseThreshold{255.0};
+    std::atomic<bool> isPlaybackActive{false};
     double averageSpeechRms = 600.0;
     bool isSpeaking = false;
     int silenceFrames = 0;

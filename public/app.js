@@ -238,7 +238,7 @@ async function loadModels() {
             models.forEach(m => {
                 const opt = document.createElement('option');
                 opt.value = m.id;
-                opt.innerText = m.name;
+                opt.innerText = m.name.replace('-medium', '').trim();
                 aiModel.appendChild(opt);
             });
             const savedModel = localStorage.getItem('speax_model');
@@ -430,6 +430,24 @@ function closeDrawers() {
     threadsSidebar.style.bottom = '-100%';
     settingsSidebar.style.left = '-320px';
     drawerOverlay.classList.remove('active');
+}
+
+function applyTheme(theme) {
+    const root = document.documentElement;
+    if (theme && theme.primary) {
+        root.style.setProperty('--primary-color', theme.primary);
+        root.style.setProperty('--secondary-color', theme.secondary || '#00D1C1');
+        root.style.setProperty('--tertiary-color', theme.tertiary || '#005A53');
+        root.style.setProperty('--background-color', theme.background || '#051329');
+        root.style.setProperty('--panel-color', theme.panel || '#0B1E36');
+    } else {
+        // Reset to defaults
+        root.style.setProperty('--primary-color', '#0E639C');
+        root.style.setProperty('--secondary-color', '#00D1C1');
+        root.style.setProperty('--tertiary-color', '#005A53');
+        root.style.setProperty('--background-color', '#051329');
+        root.style.setProperty('--panel-color', '#0B1E36');
+    }
 }
 
 drawerOverlay.onclick = closeDrawers;
@@ -761,6 +779,12 @@ serverClient = new ServerClient(
                 if (passiveAssistantToggle) passiveAssistantToggle.checked = passiveAssistant;
                 geminiSettings.style.display = s.provider === 'gemini' ? 'flex' : 'none';
                 memoryManager.setClientSide(s.clientStorage);
+
+                if (s.theme) {
+                    applyTheme(s.theme);
+                } else {
+                    applyTheme(null);
+                }
 
                 loadModels().then(() => { if (s.model) aiModel.value = s.model; });
                 loadVoices().then(() => { if (s.voice) aiVoice.value = s.voice; });

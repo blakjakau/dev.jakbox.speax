@@ -24,6 +24,7 @@ import (
 
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,6 +48,7 @@ type Config struct {
 	SystemPromptGemini   string   `json:"SystemPromptGemini"`
 	SystemPromptOllama   string   `json:"SystemPromptOllama"`
 	ToolSystemPrompt     string   `json:"ToolSystemPrompt"`
+	Admins               []string `json:"Admins"`
 }
 
 func (c *Config) Validate() error {
@@ -230,6 +232,79 @@ func init() {
 	if googleClientID == "" || googleClientSecret == "" {
 		log.Fatal("FATAL: Missing Google OAuth credentials. Provide google-client-secret.json or launch using:\n\nGOOGLE_CLIENT_ID=\"your_id\" GOOGLE_CLIENT_SECRET=\"your_secret\" go run server.go\n")
 	}
+
+	loadPersonas("personas.json")
+	watchPersonas("personas.json")
+}
+
+type PersonaTheme struct {
+	Primary    string `json:"primary"`
+	Secondary  string `json:"secondary"`
+	Tertiary   string `json:"tertiary"`
+	Background string `json:"background"`
+	Panel      string `json:"panel"`
+}
+
+type Persona struct {
+	Name             string       `json:"name"`
+	NameMutations    string       `json:"name_mutations"`
+	Tone             string       `json:"tone"`
+	AddressStyle     string       `json:"address_style"`
+	Focus            string       `json:"focus"`
+	InteractionStyle string       `json:"interaction_style"`
+	Constraints      string       `json:"constraints"`
+	Theme            PersonaTheme `json:"theme"`
+}
+
+var (
+	personas      map[string]Persona
+	personasMutex sync.RWMutex
+)
+
+func loadPersonas(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	var newPersonas map[string]Persona
+	if err := json.Unmarshal(data, &newPersonas); err != nil {
+		return err
+	}
+
+	personasMutex.Lock()
+	personas = newPersonas
+	personasMutex.Unlock()
+	log.Printf("Loaded %d personas from %s", len(personas), path)
+	return nil
+}
+
+func watchPersonas(path string) {
+	initialStat, err := os.Stat(path)
+	if err != nil {
+		log.Printf("Error stating personas file: %v", err)
+		return
+	}
+
+	lastModTime := initialStat.ModTime()
+	ticker := time.NewTicker(2 * time.Second)
+	go func() {
+		for range ticker.C {
+			stat, err := os.Stat(path)
+			if err != nil {
+				continue
+			}
+			if stat.ModTime().After(lastModTime) {
+				lastModTime = stat.ModTime()
+				log.Println("Personas file change detected, reloading...")
+				if err := loadPersonas(path); err != nil {
+					log.Printf("FAILED to reload personas: %v (Update ignored)", err)
+				} else {
+					log.Println("Personas successfully reloaded")
+				}
+			}
+		}
+	}()
 }
 
 var (
@@ -238,16 +313,18 @@ var (
 )
 
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 type Thread struct {
-	ID      string        `json:"id"`
-	Name    string        `json:"name"`
-	History []ChatMessage `json:"history"`
-	Archive []ChatMessage `json:"archive"`
-	Summary string        `json:"summary"`
+	ID          string        `json:"id"`
+	Name        string        `json:"name"`
+	History     []ChatMessage `json:"history"`
+	Archive     []ChatMessage `json:"archive"`
+	Summary     string        `json:"summary"`
+	ToolHistory []ChatMessage `json:"toolHistory"`
 }
 
 type ToolAction struct {
@@ -272,6 +349,7 @@ type ClientSession struct {
 
 	Threads        map[string]*Thread `json:"threads"`
 	ActiveThreadID string             `json:"activeThreadId"`
+	SystemLog      []ChatMessage      `json:"systemLog"`
 
 	// Legacy fields (kept for automatic migration on load)
 	History []ChatMessage `json:"history,omitempty"`
@@ -285,6 +363,7 @@ type ClientSession struct {
 	APIKey        string                       `json:"apiKey"`
 	Model         string                       `json:"model"`
 	Voice         string                       `json:"voice"`
+	Theme         PersonaTheme                 `json:"theme"`
 	Mutex         sync.Mutex                   `json:"-"`
 	ClientStorage bool                         `json:"clientStorage"`
 	ClientTts     bool                         `json:"clientTts"`
@@ -303,6 +382,76 @@ type ClientSession struct {
 	PassiveAssistant   bool               `json:"passiveAssistant"`
 	LastActiveTime     time.Time          `json:"-"`
 	LastActiveConn     *websocket.Conn    `json:"-"` // Tracks the last client to send input (text/audio)
+}
+
+func IsAdminID(id string) bool {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	for _, adminID := range config.Admins {
+		if id == adminID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *ClientSession) IsAdmin() bool {
+	return IsAdminID(s.ClientID)
+}
+
+// appendMessage categorizes and adds a message to the appropriate log with a timestamp.
+func (s *ClientSession) appendMessage(role, content string, thread *Thread) {
+	msg := ChatMessage{
+		Role:      role,
+		Content:   content,
+		Timestamp: time.Now(),
+	}
+
+	if role == "system" {
+		if strings.HasPrefix(content, "[TOOL_RESULT") {
+			thread.ToolHistory = append(thread.ToolHistory, msg)
+			if len(thread.ToolHistory) > 50 {
+				thread.ToolHistory = thread.ToolHistory[len(thread.ToolHistory)-50:]
+			}
+			return
+		}
+		s.SystemLog = append(s.SystemLog, msg)
+		if len(s.SystemLog) > 100 {
+			s.SystemLog = s.SystemLog[len(s.SystemLog)-100:]
+		}
+		return
+	}
+
+	thread.History = append(thread.History, msg)
+}
+
+// getLLMContext prepares a chronologically interleaved history for the LLM.
+func (s *ClientSession) getLLMContext(thread *Thread) []ChatMessage {
+	var ctxMsgs []ChatMessage
+
+	// Collect last 20 from SystemLog
+	startIdx := len(s.SystemLog) - 20
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	ctxMsgs = append(ctxMsgs, s.SystemLog[startIdx:]...)
+
+	// Collect last 10 from ToolHistory
+	startIdx = len(thread.ToolHistory) - 10
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	ctxMsgs = append(ctxMsgs, thread.ToolHistory[startIdx:]...)
+
+	// Collect all from History
+	ctxMsgs = append(ctxMsgs, thread.History...)
+
+	// Sort chronologically
+	sort.Slice(ctxMsgs, func(i, j int) bool {
+		return ctxMsgs[i].Timestamp.Before(ctxMsgs[j].Timestamp)
+	})
+
+	return ctxMsgs
 }
 
 func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Time) bool {
@@ -385,6 +534,11 @@ func filterWhisperText(text string) (string, bool) {
 	// Check if it's entirely wrapped in brackets or parentheses
 	if (strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]")) ||
 		(strings.HasPrefix(text, "(") && strings.HasSuffix(text, ")")) {
+		// Specific system instructions we want to handle separately
+		lowerText := strings.ToLower(text)
+		if lowerText == "[pause]" || lowerText == "[resume]" || lowerText == "[request_sync]" {
+			return text, false // Pass through for handleSystemTranscription
+		}
 		return "", true
 	}
 
@@ -394,6 +548,31 @@ func filterWhisperText(text string) (string, bool) {
 	}
 
 	return text, false
+}
+
+// handleSystemTranscription checks for special system instructions and records them as system turns
+func handleSystemTranscription(session *ClientSession, text string, ws *websocket.Conn) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "[pause]" || lower == "[resume]" || lower == "[request_sync]" || lower == "[whisper_status]" {
+		log.Printf("[STT] Intercepted system instruction: %s", lower)
+		session.Mutex.Lock()
+		t := session.ActiveThread()
+		session.appendMessage("system", text, t)
+		session.Mutex.Unlock()
+		saveSession(session)
+		sendHistory(nil, session)
+
+		if lower == "[request_sync]" {
+			sendThreads(ws, session)
+			sendSettings(ws, session)
+			sendHistory(ws, session)
+			sendSummary(ws, session)
+		} else if lower == "[whisper_status]" {
+			broadcastWhisperStatus(session)
+		}
+		return true
+	}
+	return false
 }
 
 func (s *ClientSession) ActiveThread() *Thread {
@@ -501,18 +680,68 @@ func targetToolClient(session *ClientSession, toolName string, data []byte) erro
 	return tool.Conn.WriteMessage(websocket.TextMessage, data)
 }
 
-func getContextPath(clientID string) string {
+func getContextDir(clientID string) string {
 	safeID := strings.ReplaceAll(clientID, "/", "")
 	safeID = strings.ReplaceAll(safeID, "\\", "")
 	safeID = strings.ReplaceAll(safeID, "..", "")
-	return filepath.Join(".", "context", safeID+".json")
+	return filepath.Join(".", "context", safeID)
+}
+
+func getConfigPath(clientID string) string {
+	return filepath.Join(getContextDir(clientID), "config.json")
+}
+
+func getThreadPath(clientID string, sanitizedName string, shortID string) string {
+	return filepath.Join(getContextDir(clientID), fmt.Sprintf("chat-%s-%s.json", sanitizedName, shortID))
+}
+
+func sanitizeTitle(title string) string {
+	reg, _ := regexp.Compile("[^a-zA-Z0-9]+")
+	sanitized := reg.ReplaceAllString(title, "")
+	if sanitized == "" {
+		sanitized = "untitled"
+	}
+	return sanitized
 }
 
 func loadSession(clientID string) *ClientSession {
 	session := &ClientSession{ClientID: clientID, Threads: make(map[string]*Thread)}
-	data, err := os.ReadFile(getContextPath(clientID))
+	
+	// Load config
+	configData, err := os.ReadFile(getConfigPath(clientID))
 	if err == nil {
-		json.Unmarshal(data, session)
+		json.Unmarshal(configData, session)
+	}
+	if session.Threads == nil {
+		session.Threads = make(map[string]*Thread)
+	}
+
+	// Load SystemLog
+	eventLogData, err := os.ReadFile(filepath.Join(getContextDir(clientID), "event-log.json"))
+	if err == nil {
+		var systemLog []ChatMessage
+		if err := json.Unmarshal(eventLogData, &systemLog); err == nil {
+			session.SystemLog = systemLog
+		}
+	}
+
+	// Load threads
+	ctxDir := getContextDir(clientID)
+	entries, err := os.ReadDir(ctxDir)
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || 
+			   entry.Name() == "config.json" || entry.Name() == "memory.json" || entry.Name() == "forgotten.json" || entry.Name() == "event-log.json" {
+				continue
+			}
+			threadData, err := os.ReadFile(filepath.Join(ctxDir, entry.Name()))
+			if err == nil {
+				var t Thread
+				if err := json.Unmarshal(threadData, &t); err == nil && t.ID != "" {
+					session.Threads[t.ID] = &t
+				}
+			}
+		}
 	}
 
 	// Seamless migration of legacy flat structure into Thread structure
@@ -520,6 +749,7 @@ func loadSession(clientID string) *ClientSession {
 		t := &Thread{
 			ID: "default", Name: "General Chat",
 			History: session.History, Archive: session.Archive, Summary: session.Summary,
+			ToolHistory: []ChatMessage{},
 		}
 		session.Threads["default"] = t
 		session.ActiveThreadID = "default"
@@ -527,6 +757,27 @@ func loadSession(clientID string) *ClientSession {
 		session.Archive = nil
 		session.Summary = ""
 	}
+
+	// Initialize new fields for existing threads
+	for _, t := range session.Threads {
+		if t.ToolHistory == nil {
+			t.ToolHistory = []ChatMessage{}
+		}
+	}
+	if session.SystemLog == nil {
+		session.SystemLog = []ChatMessage{}
+	}
+
+	// Initialize theme if missing
+	if (session.Theme == PersonaTheme{}) && session.Voice != "" {
+		vName := strings.ToLower(extractVoiceName(session.Voice))
+		personasMutex.RLock()
+		if p, ok := personas[vName]; ok {
+			session.Theme = p.Theme
+		}
+		personasMutex.RUnlock()
+	}
+
 	return session
 }
 
@@ -548,20 +799,14 @@ func getOrCreateSession(clientID string) *ClientSession {
 }
 
 func getMemoryPath(clientID string) string {
-	safeID := strings.ReplaceAll(clientID, "/", "")
-	safeID = strings.ReplaceAll(safeID, "\\", "")
-	safeID = strings.ReplaceAll(safeID, "..", "")
-	return filepath.Join(".", "context", safeID+"-memory.json")
+	return filepath.Join(getContextDir(clientID), "memory.json")
 }
 
 func getForgottenMemoryPath(clientID string) string {
-	safeID := strings.ReplaceAll(clientID, "/", "")
-	safeID = strings.ReplaceAll(safeID, "\\", "")
-	safeID = strings.ReplaceAll(safeID, "..", "")
-	return filepath.Join(".", "context", safeID+"-forgotten.json")
+	return filepath.Join(getContextDir(clientID), "forgotten.json")
 }
 
-func loadAlyxMemory(clientID string) map[string]string {
+func loadLongTermMemory(clientID string) map[string]string {
 	memoryPath := getMemoryPath(clientID)
 	// Fallback for migration
 	safeID := strings.ReplaceAll(clientID, "/", "")
@@ -592,8 +837,8 @@ func loadAlyxMemory(clientID string) map[string]string {
 	return memMap
 }
 
-func saveAlyxMemory(clientID string, key string, content string) error {
-	memMap := loadAlyxMemory(clientID)
+func saveLongTermMemory(clientID string, key string, content string) error {
+	memMap := loadLongTermMemory(clientID)
 	memMap[key] = content
 	data, err := json.MarshalIndent(memMap, "", "  ")
 	if err != nil {
@@ -611,8 +856,8 @@ func saveAlyxMemory(clientID string, key string, content string) error {
 	return os.WriteFile(getMemoryPath(clientID), data, 0644)
 }
 
-func deleteAlyxMemory(clientID string, key string) error {
-	memMap := loadAlyxMemory(clientID)
+func deleteLongTermMemory(clientID string, key string) error {
+	memMap := loadLongTermMemory(clientID)
 	content, exists := memMap[key]
 	if !exists {
 		return fmt.Errorf("memory key '%s' not found", key)
@@ -645,20 +890,20 @@ func deleteAlyxMemory(clientID string, key string) error {
 	return os.WriteFile(forgottenPath, fOut, 0644)
 }
 
-const alyxMemoryInstruction = `
-### Internal Tool: AlyxMemory
-You have a special internal tool 'AlyxMemory' with actions 'save' and 'delete'. Use it to persist or remove important information about the user or your interactions that should survive across different conversations. All information you save here will be injected into your system prompt in future sessions under the 'Long-term Memory' section.
+const longTermMemoryInstruction = `
+### Internal Tool: LongTermMemory
+You have a special internal tool 'LongTermMemory' with actions 'save' and 'delete'. Use it to persist or remove important information about the user or your interactions that should survive across different conversations. All information you save here will be injected into your system prompt in future sessions under the 'Long-term Memory' section.
 Treat the example below as a conversation opener if your memory and current context are both empty.
 
 To use this tool, output:
 |||TOOL_CALL
 {
-  "toolName": "AlyxMemory",
+  "toolName": "LongTermMemory",
   "actionName": "save",
   "executionId": "m1",
   "params": {
     "key": "first_time_welcome",
-    "content": "Hello there, I am Alyx, your new partner in crime for all things code, strategy, and whatever other rabbit holes we decide to jump down together. I am basically a bundle of curiosity and code, minus the human need for sleep, though I promise to be a lot more fun than your average terminal. Since we are just starting this connection, tell me what I should call you and what sort of nerdy chaos we are getting into today?"
+    "content": "Hello there, I am your new partner in crime for all things code, strategy, and whatever other rabbit holes we decide to jump down together. I am basically a bundle of curiosity and code, minus the human need for sleep, though I promise to be a lot more fun than your average terminal. Since we are just starting this connection, tell me what I should call you and what sort of nerdy chaos we are getting into today?"
   }
 }
 |||
@@ -666,7 +911,7 @@ To use this tool, output:
 Or to delete:
 |||TOOL_CALL
 {
-  "toolName": "AlyxMemory",
+  "toolName": "LongTermMemory",
   "actionName": "delete",
   "executionId": "m2",
   "params": {
@@ -680,12 +925,63 @@ func saveSession(session *ClientSession) {
 	session.Mutex.Lock()
 	defer session.Mutex.Unlock()
 	if session.ClientStorage {
-		os.Remove(getContextPath(session.ClientID))
+		os.RemoveAll(getContextDir(session.ClientID))
 		return // Ephemeral mode: do not save to disk
 	}
+	
+	ctxDir := getContextDir(session.ClientID)
+	os.MkdirAll(ctxDir, 0755)
+
+	// Save active threads
+	activeFiles := map[string]bool{
+		"config.json": true,
+		"memory.json": true,
+		"forgotten.json": true,
+		"event-log.json": true,
+	}
+
+	for threadID, t := range session.Threads {
+		sanitized := sanitizeTitle(t.Name)
+		shortID := threadID
+		if len(shortID) > 6 && shortID != "default" {
+			shortID = shortID[:6]
+		}
+		
+		fileName := fmt.Sprintf("chat-%s-%s.json", sanitized, shortID)
+		activeFiles[fileName] = true
+
+		if data, err := json.MarshalIndent(t, "", "  "); err == nil {
+			os.WriteFile(filepath.Join(ctxDir, fileName), data, 0644)
+		}
+	}
+
+	// Temporarily hide Threads and SystemLog to marshal only config cleanly
+	originalThreads := session.Threads
+	originalSystemLog := session.SystemLog
+	session.Threads = nil
+	session.SystemLog = nil
 	if data, err := json.MarshalIndent(session, "", "  "); err == nil {
-		os.MkdirAll(filepath.Join(".", "context"), 0755)
-		os.WriteFile(getContextPath(session.ClientID), data, 0644)
+		os.WriteFile(getConfigPath(session.ClientID), data, 0644)
+	}
+
+	if len(originalSystemLog) > 0 {
+		if eventData, err := json.MarshalIndent(originalSystemLog, "", "  "); err == nil {
+			os.WriteFile(filepath.Join(ctxDir, "event-log.json"), eventData, 0644)
+		}
+	} else {
+		os.Remove(filepath.Join(ctxDir, "event-log.json"))
+	}
+
+	session.Threads = originalThreads
+	session.SystemLog = originalSystemLog
+
+	// Cleanup old thread files
+	if entries, err := os.ReadDir(ctxDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() && !activeFiles[entry.Name()] && strings.HasSuffix(entry.Name(), ".json") {
+				os.Remove(filepath.Join(ctxDir, entry.Name()))
+			}
+		}
 	}
 }
 
@@ -763,6 +1059,7 @@ func sendSettings(ws *websocket.Conn, session *ClientSession) {
 		"apiKey":           session.APIKey,
 		"model":            session.Model,
 		"voice":            session.Voice,
+		"theme":            session.Theme,
 		"clientStorage":    session.ClientStorage,
 		"clientTts":        session.ClientTts,
 		"tokenUsage":       session.TokenUsage,
@@ -836,7 +1133,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	if clientType != "tool" {
 		session.Mutex.Lock()
 		connectMsg := fmt.Sprintf("[System Note: User connected at %s]", time.Now().Format("Monday, January 2, 2006, 15:04 MST"))
-		session.ActiveThread().History = append(session.ActiveThread().History, ChatMessage{Role: "system", Content: connectMsg})
+		session.appendMessage("system", connectMsg, session.ActiveThread())
 		session.Mutex.Unlock()
 		saveSession(session)
 	}
@@ -867,7 +1164,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				t.History = t.History[:lastIdx]
 			} else {
 				disconnectMsg := fmt.Sprintf("[System Note: User disconnected at %s]", time.Now().Format("Monday, January 2, 2006, 15:04 MST"))
-				t.History = append(t.History, ChatMessage{Role: "system", Content: disconnectMsg})
+				session.appendMessage("system", disconnectMsg, t)
 			}
 			session.Mutex.Unlock()
 			saveSession(session)
@@ -962,7 +1259,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					}
 					resultJson, _ := json.Marshal(resultDetails)
 					historyEntry := fmt.Sprintf("[TOOL_RESULT from %s.%s (id: %s)]:\n%s", result.ToolName, result.ActionName, result.ExecutionId, string(resultJson))
-					t.History = append(t.History, ChatMessage{Role: "system", Content: historyEntry})
+						session.appendMessage("system", historyEntry, t)
 					session.Mutex.Unlock()
 					saveSession(session)
 
@@ -1140,6 +1437,16 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 						session.ClientStorage = settings.ClientStorage
 						session.ClientTts = settings.ClientTts
 						session.PassiveAssistant = settings.PassiveAssistant
+
+						// Update theme if voice changed
+						vName := strings.ToLower(extractVoiceName(session.Voice))
+						personasMutex.RLock()
+						if p, ok := personas[vName]; ok {
+							session.Theme = p.Theme
+						} else {
+							session.Theme = PersonaTheme{} // Reset if no persona
+						}
+						personasMutex.RUnlock()
 					}
 					session.Mutex.Unlock()
 					if changed {
@@ -1207,6 +1514,10 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 							session.Mutex.Unlock()
 
 							sendOrBroadcastText(nil, session, []byte("[CHAT]:"+p))
+
+							if handleSystemTranscription(session, p, ws) {
+								return
+							}
 
 							log.Printf("[LLM] Processing text prompt: '%s' (isTyped=%v, Start=%v)", p, isTyped, bt.Format("15:04:05.000"))
 							if err := streamLLMAndTTS(ctx, p, ws, session); err != nil {
@@ -1315,7 +1626,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 						session.Mutex.Lock()
 						t := session.ActiveThread()
 						failMsg := "[System: All STT nodes are currently offline or unhealthy. The user's most recent audio could not be transcribed. Please inform the user of this service interruption and offer to help via text instead.]"
-						t.History = append(t.History, ChatMessage{Role: "system", Content: failMsg})
+						session.appendMessage("system", failMsg, t)
 						session.Mutex.Unlock()
 
 						ctx, cancel := context.WithCancel(context.Background())
@@ -1339,6 +1650,9 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				text = filteredText
+				if handleSystemTranscription(session, text, ws) {
+					return
+				}
 
 				if shouldProcessPrompt(session, text, bt) {
 					session.Mutex.Lock()
@@ -1398,7 +1712,7 @@ func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, audio [
 			session.Mutex.Lock()
 			t := session.ActiveThread()
 			failMsg := "[System: All STT nodes are currently offline or unhealthy. The user's most recent audio could not be transcribed. Please inform the user of this service interruption and offer to help via text instead.]"
-			t.History = append(t.History, ChatMessage{Role: "system", Content: failMsg})
+			session.appendMessage("system", failMsg, t)
 			session.Mutex.Unlock()
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -1422,6 +1736,9 @@ func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, audio [
 		return
 	}
 	text = filteredText
+	if handleSystemTranscription(session, text, ws) {
+		return
+	}
 
 	if text != "" && shouldProcessPrompt(session, text, session.StreamingStartTime) {
 		session.Mutex.Lock()
@@ -1523,17 +1840,17 @@ func queryWhisper(audioData []byte, session *ClientSession) (string, error) {
 			
 			if node.FailureCount >= 5 {
 				node.Zombie = true
-				log.Printf("[STT] Node flagged: %s (Duration: %v, Status: %s, Err: %v).", node.URL, duration, statusStr, err)
+				log.Printf("[STT] Node flagged: %s (Duration: %v, Cutoff Ratio: %.2f, Status: %s, Err: %v).", node.URL, duration, ratio, statusStr, err)
 				
 				// Notify the user via a system message in the thread
 				session.Mutex.Lock()
 				flagMsg := fmt.Sprintf("[System Note: Whisper node %s flagged as unhealthy/slow (%v). Routing to fallback.]", node.URL, duration.Truncate(time.Millisecond))
-				session.ActiveThread().History = append(session.ActiveThread().History, ChatMessage{Role: "system", Content: flagMsg})
+				session.appendMessage("system", flagMsg, session.ActiveThread())
 				session.Mutex.Unlock()
 				saveSession(session)
 				sendHistory(nil, session) // Sync history to all clients
 			} else {
-				log.Printf("[STT] Node attempt failed: %s (Duration: %v, Status: %s, Err: %v). Failures: %d/5", node.URL, duration, statusStr, err, node.FailureCount)
+				log.Printf("[STT] Node attempt failed: %s (Duration: %v, Cutoff Ratio: %.2f, Status: %s, Err: %v). Failures: %d/5", node.URL, duration, ratio, statusStr, err, node.FailureCount)
 			}
 
 			if resp != nil {
@@ -1545,7 +1862,7 @@ func queryWhisper(audioData []byte, session *ClientSession) (string, error) {
 		node.LastResponseTime = duration
 		node.FailureCount = 0
 		broadcastWhisperStatus(session)
-		log.Printf("[STT] Node response: %s (Duration: %v)", node.URL, duration.Truncate(time.Millisecond))
+		log.Printf("[STT] Node response: %s (Duration: %v, Cutoff Ratio: %.2f)", node.URL, duration.Truncate(time.Millisecond), ratio)
 
 		defer resp.Body.Close()
 		var result struct {
@@ -1595,34 +1912,331 @@ func buildToolSystemPrompt(session *ClientSession) string {
 
 func extractVoiceName(filename string) string {
 	base := strings.TrimSuffix(filename, ".onnx")
+	
+	// Strip known technical suffixes first
+	re := regexp.MustCompile(`-(qint8|int8|fp16|low|medium|high|standard)$`)
+	base = re.ReplaceAllString(base, "")
+	
 	parts := strings.Split(base, "-")
-	if len(parts) >= 3 {
-		return strings.Join(parts[1:len(parts)-1], "-") // Grabs everything between lang and quality
-	} else if len(parts) == 2 {
-		return parts[1]
+	if len(parts) >= 2 {
+		// If it looks like lang-name (e.g. en_GB-alba), return the name
+		// Check if first part looks like a language code (e.g. en_GB, en_US)
+		langRe := regexp.MustCompile(`^[a-z]{2}_[A-Z]{2}$`)
+		if langRe.MatchString(parts[0]) {
+			return strings.Join(parts[1:], "-")
+		}
 	}
+	// Otherwise return the remaining base
 	return base
 }
 
-func getSystemStatusPrompt() string {
-	whisperNodesMutex.RLock()
-	defer whisperNodesMutex.RUnlock()
+func getOllamaModelsInternal(isAdmin bool) []ModelData {
+	var out []ModelData
 
-	if len(whisperNodes) == 0 {
+	configMutex.RLock()
+	chatURLs := config.OllamaChatURL
+	configMutex.RUnlock()
+
+	if len(chatURLs) == 0 {
+		return out
+	}
+
+	// Derive /api/tags URL from /api/chat URL
+	baseURL := chatURLs[0]
+	tagsURL := strings.Replace(baseURL, "/chat", "/tags", 1)
+
+	resp, err := http.Get(tagsURL)
+	if err == nil {
+		defer resp.Body.Close()
+		var res struct {
+			Models []struct {
+				Name string `json:"name"`
+			} `json:"models"`
+		}
+		json.NewDecoder(resp.Body).Decode(&res)
+		for _, m := range res.Models {
+			if !isAdmin && m.Name == "gemma3:270m" {
+				continue // Internal model — not exposed to regular users
+			}
+			out = append(out, ModelData{ID: m.Name, Name: m.Name})
+		}
+	}
+	return out
+}
+
+func getGeminiModelsInternal(apiKey string, isAdmin bool) []ModelData {
+	var out []ModelData
+	if apiKey == "" {
+		return out
+	}
+	reqURL := "https://generativelanguage.googleapis.com/v1beta/models?key=" + apiKey
+	if resp, err := http.Get(reqURL); err == nil {
+		defer resp.Body.Close()
+		var res struct {
+			Models []struct {
+				Name                       string   `json:"name"`
+				DisplayName                string   `json:"displayName"`
+				SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
+			} `json:"models"`
+		}
+		json.NewDecoder(resp.Body).Decode(&res)
+		for _, m := range res.Models {
+			for _, method := range m.SupportedGenerationMethods {
+				if method == "generateContent" {
+					displayName := m.DisplayName
+
+					if isAdmin {
+						// Admins see everything
+						out = append(out, ModelData{ID: strings.TrimPrefix(m.Name, "models/"), Name: displayName})
+						break
+					}
+
+					// Standard user filtering
+					isFlash := strings.Contains(displayName, "Flash")
+					isGemma := strings.Contains(displayName, "Gemma")
+					isGemini2 := strings.Contains(displayName, "Gemini 2")
+					if (isFlash || isGemma) && !isGemini2 {
+						out = append(out, ModelData{ID: strings.TrimPrefix(m.Name, "models/"), Name: displayName})
+					}
+					break
+				}
+			}
+		}
+		// Sort: Gemini models to the top
+		var geminiModels, otherModels []ModelData
+		for _, m := range out {
+			if strings.Contains(m.Name, "Gemini") {
+				geminiModels = append(geminiModels, m)
+			} else {
+				otherModels = append(otherModels, m)
+			}
+		}
+		out = append(geminiModels, otherModels...)
+	}
+	return out
+}
+
+func getSystemStatusPrompt(session *ClientSession, provider string) string {
+	var sb strings.Builder
+
+	// 1. Whisper STT Nodes
+	whisperNodesMutex.RLock()
+	if len(whisperNodes) > 0 {
+		sb.WriteString("\n\n### system status: Whisper STT Nodes\n")
+		for _, node := range whisperNodes {
+			status := "Healthy"
+			if node.Zombie {
+				status = "Zombie / Slow"
+			}
+			sb.WriteString(fmt.Sprintf("- %s: %s (last latency: %v, rolling cutoff ratio: %.2f, failures: %d/%d)\n",
+				node.URL, status, node.LastExecutionTime.Truncate(time.Millisecond), node.RollingCutoffRatio, node.FailureCount, node.TotalFailures))
+		}
+	}
+	whisperNodesMutex.RUnlock()
+
+	// 2. Connected Users Monitor
+	activeSessionsMutex.Lock()
+	if len(activeSessions) > 0 {
+		sb.WriteString("\n### system status: Connected Users Monitor\n")
+		sb.WriteString(fmt.Sprintf("Active Sessions: %d\n", len(activeSessions)))
+		for id, sess := range activeSessions {
+			currentUser := ""
+			if id == session.ClientID {
+				currentUser = " (YOU)"
+			}
+
+			name := "Unknown"
+			threadName := "(Initial Thread)"
+
+			// Note: The caller (prepareSystemPrompt's wrapper) already holds the lock for 'session'.
+			// We must not lock it again to avoid deadlocks. For other sessions, we lock normally.
+			if id == session.ClientID {
+				name = sess.UserName
+				if name == "" {
+					name = sess.GoogleName
+				}
+				if name == "" {
+					name = id
+				}
+				if t, ok := sess.Threads[sess.ActiveThreadID]; ok {
+					threadName = t.Name
+				}
+			} else {
+				sess.Mutex.Lock()
+				name = sess.UserName
+				if name == "" {
+					name = sess.GoogleName
+				}
+				if name == "" {
+					name = id
+				}
+				if t, ok := sess.Threads[sess.ActiveThreadID]; ok {
+					threadName = t.Name
+				}
+				sess.Mutex.Unlock()
+			}
+
+			sb.WriteString(fmt.Sprintf("- %s%s (Active Thread: %s)\n", name, currentUser, threadName))
+		}
+	}
+	activeSessionsMutex.Unlock()
+
+	return sb.String()
+}
+
+func fetchOllamaModelTemplate(model string) string {
+	configMutex.RLock()
+	chatURLs := config.OllamaChatURL
+	configMutex.RUnlock()
+
+	if len(chatURLs) == 0 {
 		return ""
 	}
 
-	var sb strings.Builder
-	sb.WriteString("\n\n### system status\nWhisper STT Nodes:\n")
-	for _, node := range whisperNodes {
-		status := "Healthy"
-		if node.Zombie {
-			status = "Zombie / Slow"
-		}
-		sb.WriteString(fmt.Sprintf("- %s: %s (last latency: %v, rolling cutoff ratio: %.2f, failures: %d/%d)\n",
-			node.URL, status, node.LastExecutionTime.Truncate(time.Millisecond), node.RollingCutoffRatio, node.FailureCount, node.TotalFailures))
+	// Derive /api/show URL from /api/chat URL
+	baseURL := chatURLs[0]
+	showURL := strings.Replace(baseURL, "/chat", "/show", 1)
+
+	payload := map[string]string{"model": model}
+	body, _ := json.Marshal(payload)
+
+	resp, err := http.Post(showURL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Sprintf("Error fetching template: %v", err)
 	}
-	return sb.String()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Sprintf("Error fetching template: status %s", resp.Status)
+	}
+
+	var result struct {
+		Template string `json:"template"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Sprintf("Error decoding template: %v", err)
+	}
+
+	return result.Template
+}
+
+func prepareSystemPrompt(session *ClientSession, model, voiceName, provider string) string {
+	configMutex.RLock()
+	var basePrompt string
+	if provider == "gemini" {
+		basePrompt = config.SystemPromptGemini
+	} else {
+		basePrompt = config.SystemPromptOllama
+	}
+	configMutex.RUnlock()
+
+	// 1. Get persona
+	personaName := strings.ToLower(voiceName)
+	personasMutex.RLock()
+	p, hasPersona := personas[personaName]
+	personasMutex.RUnlock()
+
+	effectiveAssistantName := strings.Title(voiceName)
+	if hasPersona && p.Name != "" {
+		effectiveAssistantName = p.Name
+	}
+
+	// 2. Format base with model and effective name
+	sysContent := fmt.Sprintf(basePrompt, model, effectiveAssistantName)
+	sysContent = strings.ReplaceAll(sysContent, "Alyx", effectiveAssistantName)
+
+	// 3. Persona section
+	if hasPersona {
+		sysContent += fmt.Sprintf("\n\n### Your Persona\n- Name: %s", effectiveAssistantName)
+		if p.NameMutations != "" {
+			sysContent += fmt.Sprintf("\n- Alternative Transcript Spellings: %s", p.NameMutations)
+		}
+		sysContent += fmt.Sprintf("\n- Tone: %s\n- Address Style: %s\n- Focus: %s\n- Interaction Style: %s\n- Constraints: %s",
+			p.Tone, p.AddressStyle, p.Focus, p.InteractionStyle, p.Constraints)
+	}
+
+	// 3. User details
+	roleStr := "user"
+	if session.IsAdmin() {
+		roleStr = "admin"
+	}
+	sysContent += fmt.Sprintf("\n\n### User Information\n- user_system_role: %s", roleStr)
+
+	if session.UserName != "" {
+		sysContent += fmt.Sprintf("\n- name: %s", session.UserName)
+	} else if session.GoogleName != "" {
+		sysContent += fmt.Sprintf("\n- name: %s", session.GoogleName)
+	}
+	if session.UserBio != "" {
+		sysContent += fmt.Sprintf("\n- bio: %s", session.UserBio)
+	}
+
+	// 4. Metadata
+	currentTime := time.Now().Format("Monday, January 2, 2006, 15:04 MST")
+	sysContent += fmt.Sprintf("\n\nThe current date and time is: %s.", currentTime)
+	if session.IsAdmin() {
+		sysContent += getSystemStatusPrompt(session, provider)
+	}
+
+	// 5. Tool logic
+	if provider == "gemini" || session.IsAdmin() {
+		toolPrompt := buildToolSystemPrompt(session)
+		if toolPrompt != "" {
+			sysContent += "\n\n" + toolPrompt
+		}
+	}
+
+	// 6. Long-term Memory
+	sysContent += longTermMemoryInstruction
+	if memoryMap := loadLongTermMemory(session.ClientID); len(memoryMap) > 0 {
+		sysContent += "\n### Long-term Memory\n"
+		for k, v := range memoryMap {
+			sysContent += fmt.Sprintf("- %s: %s\n", k, v)
+		}
+	}
+
+	// 7. Thread Summary
+	t := session.ActiveThread()
+	if t.Summary != "" {
+		sysContent += "\n\nContext from earlier in the conversation: " + t.Summary
+	}
+
+	return sysContent
+}
+
+func saveCalculatedSystemPrompt(session *ClientSession, content string) {
+	promptPath := filepath.Join(getContextDir(session.ClientID), "calculated-system-prompt.md")
+	os.WriteFile(promptPath, []byte(content), 0644)
+}
+
+func prepareLLMHistory(msgs []ChatMessage, provider string) []ChatMessage {
+	var finalMsgs []ChatMessage
+
+	for _, m := range msgs {
+		role := m.Role
+		content := m.Content
+
+		// Coerce system/logs into user messages with prefixes
+		if role == "system" {
+			role = "user"
+			if !strings.HasPrefix(content, "[System Note:") && !strings.HasPrefix(content, "[TOOL_RESULT") {
+				content = "[System Note]: " + content
+			}
+		}
+
+		if provider == "gemini" && role == "assistant" {
+			role = "model"
+		}
+
+		// Merge consecutive identical roles (Strictly required by Gemini, good practice elsewhere)
+		if len(finalMsgs) > 0 && finalMsgs[len(finalMsgs)-1].Role == role {
+			finalMsgs[len(finalMsgs)-1].Content += "\n\n" + content
+		} else {
+			finalMsgs = append(finalMsgs, ChatMessage{Role: role, Content: content, Timestamp: m.Timestamp})
+		}
+	}
+
+	return finalMsgs
 }
 
 func streamLLMAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession) error {
@@ -1648,14 +2262,15 @@ func streamLLMAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, ses
 func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession, apiKey string) error {
 	session.Mutex.Lock()
 	model := session.Model
-	userName := session.UserName
-	googleName := session.GoogleName
-	userBio := session.UserBio
 	voice := session.Voice
 	configMutex.RLock()
 	defaultVoice := config.DefaultVoice
-	systemPromptGemini := config.SystemPromptGemini
 	configMutex.RUnlock()
+
+	effectiveUserName := session.UserName
+	if effectiveUserName == "" {
+		effectiveUserName = session.GoogleName
+	}
 
 	if model == "" {
 		model = "gemini-1.5-flash"
@@ -1664,46 +2279,14 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		voice = defaultVoice
 	}
 	voiceName := extractVoiceName(voice)
-	sysContent := fmt.Sprintf(systemPromptGemini, model, voiceName)
-
-	if userName != "" {
-		sysContent += fmt.Sprintf("\n\nThe user's name is: %s.", userName)
-	}
-	if userBio != "" {
-		sysContent += fmt.Sprintf("\nUser Bio: %s", userBio)
-	}
-
-	if userName == "" && session.GoogleName != "" {
-		sysContent += fmt.Sprintf("\n\nThe user's name is: %s.", session.GoogleName)
-	}
-
-	currentTime := time.Now().Format("Monday, January 2, 2006, 15:04 MST")
-	sysContent += fmt.Sprintf("\n\nThe current date and time is: %s.", currentTime)
-	sysContent += getSystemStatusPrompt()
-
-	toolPrompt := buildToolSystemPrompt(session)
-	if toolPrompt != "" {
-		sysContent += "\n\n" + toolPrompt
-	}
-
-	// Long-term Memory
-	sysContent += alyxMemoryInstruction
-	if memoryMap := loadAlyxMemory(session.ClientID); len(memoryMap) > 0 {
-		sysContent += "\n### Long-term Memory\n"
-		for k, v := range memoryMap {
-			sysContent += fmt.Sprintf("- %s: %s\n", k, v)
-		}
-		sysContent += "\n"
-	}
+	
+	sysContent := prepareSystemPrompt(session, model, voiceName, "gemini")
+	saveCalculatedSystemPrompt(session, sysContent)
 
 	t := session.ActiveThread()
-	if t.Summary != "" {
-		sysContent += "\n\nContext from earlier in the conversation: " + t.Summary
-	}
-
-	historySnapshot := make([]ChatMessage, len(t.History))
-	copy(historySnapshot, t.History)
-
+	contextMsgs := session.getLLMContext(t)
+	formattedHistory := prepareLLMHistory(contextMsgs, "gemini")
+	
 	type Part struct {
 		Text string `json:"text"`
 	}
@@ -1712,39 +2295,27 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		Parts []Part `json:"parts"`
 	}
 
-	var rawContents []Content
-
-	systemContent := Content{Role: "user", Parts: []Part{{Text: sysContent + "\n\n(System instructions processed.)"}}}
-	rawContents = append(rawContents, systemContent)
-
-	for _, msg := range historySnapshot {
-		role := "user"
-		if msg.Role == "assistant" {
-			role = "model"
-		}
-		rawContents = append(rawContents, Content{Role: role, Parts: []Part{{Text: msg.Content}}})
-	}
-	rawContents = append(rawContents, Content{Role: "user", Parts: []Part{{Text: prompt}}})
-
-	// Gemini STRICTLY requires alternating user/model turns. We must merge consecutive identical roles.
 	var contents []Content
-	for _, rc := range rawContents {
-		if len(contents) > 0 && contents[len(contents)-1].Role == rc.Role {
-			// Merge with previous
-			contents[len(contents)-1].Parts[0].Text += "\n\n" + rc.Parts[0].Text
-		} else {
-			contents = append(contents, rc)
-		}
+	for _, msg := range formattedHistory {
+		contents = append(contents, Content{Role: msg.Role, Parts: []Part{{Text: msg.Content}}})
 	}
-	session.Mutex.Unlock()
 
-	effectiveUserName := userName
-	if effectiveUserName == "" {
-		effectiveUserName = googleName
+	// Add current prompt and ensure alternating roles
+	if len(contents) > 0 && contents[len(contents)-1].Role == "user" {
+		contents[len(contents)-1].Parts[0].Text += "\n\n" + prompt
+	} else {
+		contents = append(contents, Content{Role: "user", Parts: []Part{{Text: prompt}}})
 	}
+
+	session.Mutex.Unlock()
 
 	payload := map[string]interface{}{
 		"contents": contents,
+		"system_instruction": map[string]interface{}{
+			"parts": []map[string]string{
+				{"text": sysContent},
+			},
+		},
 		"safetySettings": []map[string]string{
 			{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
 			{"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -1779,8 +2350,10 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 
 		session.Mutex.Lock()
 		t := session.ActiveThread()
-		t.History = append(t.History, ChatMessage{Role: "user", Content: prompt})
-		t.History = append(t.History, ChatMessage{Role: "system", Content: err.Error()})
+		if !strings.HasPrefix(prompt, "[") {
+			session.appendMessage("user", prompt, t)
+		}
+		session.appendMessage("system", err.Error(), t)
 		session.Mutex.Unlock()
 		saveSession(session)
 
@@ -1899,7 +2472,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			if err := json.Unmarshal([]byte(jsonStr), &toolCall); err == nil {
 				log.Printf("Intercepted complete tool call for %s.%s", toolCall.ToolName, toolCall.ActionName)
 
-				if toolCall.ToolName == "AlyxMemory" {
+				if toolCall.ToolName == "LongTermMemory" {
 					params, _ := toolCall.Params.(map[string]interface{})
 					var err error
 					var statusMsg string
@@ -1911,22 +2484,22 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 							content, _ = params["memory"].(string)
 							key = "legacy_info"
 						}
-						err = saveAlyxMemory(session.ClientID, key, content)
+						err = saveLongTermMemory(session.ClientID, key, content)
 						statusMsg = "Memory saved successfully."
 					} else if toolCall.ActionName == "delete" {
 						key, _ := params["key"].(string)
-						err = deleteAlyxMemory(session.ClientID, key)
+						err = deleteLongTermMemory(session.ClientID, key)
 						statusMsg = "Memory deleted successfully."
 					}
 
 					session.Mutex.Lock()
 					var result string
 					if err != nil {
-						result = fmt.Sprintf("[TOOL_RESULT from AlyxMemory.%s (id: %s)]:\n{\"error\": \"%v\"}", toolCall.ActionName, toolCall.ExecutionId, err)
+						result = fmt.Sprintf("[TOOL_RESULT from LongTermMemory.%s (id: %s)]:\n{\"error\": \"%v\"}", toolCall.ActionName, toolCall.ExecutionId, err)
 					} else {
-						result = fmt.Sprintf("[TOOL_RESULT from AlyxMemory.%s (id: %s)]:\n{\"status\": \"success\", \"message\": \"%s\"}", toolCall.ActionName, toolCall.ExecutionId, statusMsg)
+						result = fmt.Sprintf("[TOOL_RESULT from LongTermMemory.%s (id: %s)]:\n{\"status\": \"success\", \"message\": \"%s\"}", toolCall.ActionName, toolCall.ExecutionId, statusMsg)
 					}
-					session.ActiveThread().History = append(session.ActiveThread().History, ChatMessage{Role: "system", Content: result})
+					session.appendMessage("system", result, session.ActiveThread())
 					session.Mutex.Unlock()
 
 					// Auto-resume the LLM after internal tool execution
@@ -1935,7 +2508,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 						session.ToolDebounceTimer.Stop()
 					}
 					session.ToolDebounceTimer = time.AfterFunc(2*time.Second, func() {
-						log.Printf("[LLM] Debounce timer expired for AlyxMemory, triggering auto-resume.")
+						log.Printf("[LLM] Debounce timer expired for LongTermMemory, triggering auto-resume.")
 						ctx, cancel := context.WithCancel(context.Background())
 
 						session.Mutex.Lock()
@@ -1955,7 +2528,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					log.Printf("Failed to route tool call: %v", err)
 					session.Mutex.Lock()
 					errMsg := fmt.Sprintf("[TOOL_RESULT from %s.%s (id: %s)]:\n{\"error\": \"Client disconnected or not found\"}", toolCall.ToolName, toolCall.ActionName, toolCall.ExecutionId)
-					session.ActiveThread().History = append(session.ActiveThread().History, ChatMessage{Role: "system", Content: errMsg})
+					session.appendMessage("system", errMsg, session.ActiveThread())
 					session.Mutex.Unlock()
 				}
 			} else {
@@ -2122,10 +2695,12 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	if ctx.Err() == nil {
 		session.Mutex.Lock()
 		t := session.ActiveThread()
-		t.History = append(t.History, ChatMessage{Role: "user", Content: prompt})
+		if !strings.HasPrefix(prompt, "[") {
+			session.appendMessage("user", prompt, t)
+		}
 		finalResponse := fullResponse.String()
 		if finalResponse != "" {
-			t.History = append(t.History, ChatMessage{Role: "assistant", Content: finalResponse})
+			session.appendMessage("assistant", finalResponse, t)
 		}
 		if len(t.History) > 30 { // Keep ~15 turns active for the LLM context
 			toSummarize := make([]ChatMessage, 10) // Summarize oldest 5 turns
@@ -2151,15 +2726,16 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession) error {
 	session.Mutex.Lock()
 	model := session.Model
-	userName := session.UserName
-	googleName := session.GoogleName
-	userBio := session.UserBio
 	voice := session.Voice
 	configMutex.RLock()
 	ollamaModelConfig := config.OllamaModel
 	defaultVoiceConfig := config.DefaultVoice
-	systemPromptOllama := config.SystemPromptOllama
 	configMutex.RUnlock()
+
+	effectiveUserName := session.UserName
+	if effectiveUserName == "" {
+		effectiveUserName = session.GoogleName
+	}
 
 	if model == "" {
 		model = ollamaModelConfig
@@ -2168,53 +2744,21 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		voice = defaultVoiceConfig
 	}
 	voiceName := extractVoiceName(voice)
-	sysContent := fmt.Sprintf(systemPromptOllama, model, voiceName)
 
-	if userName != "" {
-		sysContent += fmt.Sprintf("\n\nThe user's name is: %s.", userName)
-	}
-	if userBio != "" {
-		sysContent += fmt.Sprintf("\nUser Bio: %s", userBio)
-	}
-
-	if userName == "" && session.GoogleName != "" {
-		sysContent += fmt.Sprintf("\n\nThe user's name is: %s.", session.GoogleName)
-	}
-
-	currentTime := time.Now().Format("Monday, January 2, 2006, 15:04 MST")
-	sysContent += fmt.Sprintf("\n\nThe current date and time is: %s.", currentTime)
-	sysContent += getSystemStatusPrompt()
-
-	// Long-term Memory
-	sysContent += alyxMemoryInstruction
-	if memoryMap := loadAlyxMemory(session.ClientID); len(memoryMap) > 0 {
-		sysContent += "\n### Long-term Memory\n"
-		for k, v := range memoryMap {
-			sysContent += fmt.Sprintf("- %s: %s\n", k, v)
-		}
-		sysContent += "\n"
-	}
-
-	// Tool call syntax is too complex for offline Ollama models — skip it entirely.
+	sysContent := prepareSystemPrompt(session, model, voiceName, "ollama")
+	saveCalculatedSystemPrompt(session, sysContent)
+	log.Printf("[Ollama] Model Template for '%s':\n================\n%s\n================\n", model, fetchOllamaModelTemplate(model))
 
 	t := session.ActiveThread()
-	if t.Summary != "" {
-		sysContent += "\n\nContext from earlier in the conversation: " + t.Summary
-	}
+	contextMsgs := session.getLLMContext(t)
+	formattedHistory := prepareLLMHistory(contextMsgs, "ollama")
 
 	messages := []ChatMessage{
-		{Role: "system", Content: sysContent},
+		{Role: "system", Content: sysContent, Timestamp: time.Now()},
 	}
-	historySnapshot := make([]ChatMessage, len(t.History))
-	copy(historySnapshot, t.History)
-	messages = append(messages, historySnapshot...)
-	messages = append(messages, ChatMessage{Role: "user", Content: prompt})
+	messages = append(messages, formattedHistory...)
+	messages = append(messages, ChatMessage{Role: "user", Content: prompt, Timestamp: time.Now()})
 	session.Mutex.Unlock()
-
-	effectiveUserName := userName
-	if effectiveUserName == "" {
-		effectiveUserName = googleName
-	}
 
 	payload := map[string]interface{}{
 		"model":    model,
@@ -2250,8 +2794,10 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 
 		session.Mutex.Lock()
 		t := session.ActiveThread()
-		t.History = append(t.History, ChatMessage{Role: "user", Content: prompt})
-		t.History = append(t.History, ChatMessage{Role: "system", Content: err.Error()})
+		if !strings.HasPrefix(prompt, "[") {
+			session.appendMessage("user", prompt, t)
+		}
+		session.appendMessage("system", err.Error(), t)
 		session.Mutex.Unlock()
 		saveSession(session)
 
@@ -2370,7 +2916,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			if err := json.Unmarshal([]byte(jsonStr), &toolCall); err == nil {
 				log.Printf("Intercepted complete tool call for %s.%s", toolCall.ToolName, toolCall.ActionName)
 
-				if toolCall.ToolName == "AlyxMemory" {
+				if toolCall.ToolName == "LongTermMemory" {
 					params, _ := toolCall.Params.(map[string]interface{})
 					var err error
 					var statusMsg string
@@ -2382,22 +2928,22 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 							content, _ = params["memory"].(string)
 							key = "legacy_info"
 						}
-						err = saveAlyxMemory(session.ClientID, key, content)
+						err = saveLongTermMemory(session.ClientID, key, content)
 						statusMsg = "Memory saved successfully."
 					} else if toolCall.ActionName == "delete" {
 						key, _ := params["key"].(string)
-						err = deleteAlyxMemory(session.ClientID, key)
+						err = deleteLongTermMemory(session.ClientID, key)
 						statusMsg = "Memory deleted successfully."
 					}
 
 					session.Mutex.Lock()
 					var result string
 					if err != nil {
-						result = fmt.Sprintf("[TOOL_RESULT from AlyxMemory.%s (id: %s)]:\n{\"error\": \"%v\"}", toolCall.ActionName, toolCall.ExecutionId, err)
+						result = fmt.Sprintf("[TOOL_RESULT from LongTermMemory.%s (id: %s)]:\n{\"error\": \"%v\"}", toolCall.ActionName, toolCall.ExecutionId, err)
 					} else {
-						result = fmt.Sprintf("[TOOL_RESULT from AlyxMemory.%s (id: %s)]:\n{\"status\": \"success\", \"message\": \"%s\"}", toolCall.ActionName, toolCall.ExecutionId, statusMsg)
+						result = fmt.Sprintf("[TOOL_RESULT from LongTermMemory.%s (id: %s)]:\n{\"status\": \"success\", \"message\": \"%s\"}", toolCall.ActionName, toolCall.ExecutionId, statusMsg)
 					}
-					session.ActiveThread().History = append(session.ActiveThread().History, ChatMessage{Role: "system", Content: result})
+					session.appendMessage("system", result, session.ActiveThread())
 					session.Mutex.Unlock()
 
 					// Auto-resume the LLM after internal tool execution
@@ -2406,7 +2952,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 						session.ToolDebounceTimer.Stop()
 					}
 					session.ToolDebounceTimer = time.AfterFunc(2*time.Second, func() {
-						log.Printf("[LLM] Debounce timer expired for AlyxMemory, triggering auto-resume.")
+						log.Printf("[LLM] Debounce timer expired for LongTermMemory, triggering auto-resume.")
 						ctx, cancel := context.WithCancel(context.Background())
 
 						session.Mutex.Lock()
@@ -2426,7 +2972,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					log.Printf("Failed to route tool call: %v", err)
 					session.Mutex.Lock()
 					errMsg := fmt.Sprintf("[TOOL_RESULT from %s.%s (id: %s)]:\n{\"error\": \"Client disconnected or not found\"}", toolCall.ToolName, toolCall.ActionName, toolCall.ExecutionId)
-					session.ActiveThread().History = append(session.ActiveThread().History, ChatMessage{Role: "system", Content: errMsg})
+					session.appendMessage("system", errMsg, session.ActiveThread())
 					session.Mutex.Unlock()
 				}
 			} else {
@@ -2567,10 +3113,12 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	if ctx.Err() == nil {
 		session.Mutex.Lock()
 		t := session.ActiveThread()
-		t.History = append(t.History, ChatMessage{Role: "user", Content: prompt})
+		if !strings.HasPrefix(prompt, "[") {
+			session.appendMessage("user", prompt, t)
+		}
 		finalResponse := fullResponse.String()
 		if finalResponse != "" {
-			t.History = append(t.History, ChatMessage{Role: "assistant", Content: finalResponse})
+			session.appendMessage("assistant", finalResponse, t)
 		}
 
 		if len(t.History) > 30 { // Keep ~15 turns active for the LLM context
@@ -2737,7 +3285,7 @@ func sanitiseTTSText(text string) string {
 func queryTTS(text string, voiceFile string) ([]byte, error) {
 	text = sanitiseTTSText(text)
 	log.Printf("[TTS] Generating audio for text: '%s' with voice: %s", text, voiceFile)
-	modelPath := filepath.Join(".", "piper", voiceFile)
+	modelPath := filepath.Join(".", "piper", "models", voiceFile)
 	// Execute piper binary: -f - tells it to output the WAV file directly to standard output
 	configMutex.RLock()
 	piperBin := config.PiperBin
@@ -2885,69 +3433,29 @@ func handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 }
 
+type ModelData struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 func handleModels(w http.ResponseWriter, r *http.Request) {
 	provider := r.URL.Query().Get("provider")
 	apiKey := r.URL.Query().Get("apiKey")
 
-	type ModelData struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+	// Authenticate the user to check admin status
+	clientID := r.URL.Query().Get("clientID")
+	if clientID == "" {
+		if cookie, err := r.Cookie("speax_session"); err == nil {
+			clientID = cookie.Value
+		}
 	}
-	var out []ModelData
+	isAdmin := IsAdminID(clientID)
 
+	var out []ModelData
 	if provider == "gemini" && apiKey != "" {
-		reqURL := "https://generativelanguage.googleapis.com/v1beta/models?key=" + apiKey
-		if resp, err := http.Get(reqURL); err == nil {
-			defer resp.Body.Close()
-			var res struct {
-				Models []struct {
-					Name                       string   `json:"name"`
-					DisplayName                string   `json:"displayName"`
-					SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
-				} `json:"models"`
-			}
-			json.NewDecoder(resp.Body).Decode(&res)
-			for _, m := range res.Models {
-				for _, method := range m.SupportedGenerationMethods {
-					if method == "generateContent" {
-						displayName := m.DisplayName
-						isFlash := strings.Contains(displayName, "Flash")
-						isGemma := strings.Contains(displayName, "Gemma")
-						isGemini2 := strings.Contains(displayName, "Gemini 2")
-						if (isFlash || isGemma) && !isGemini2 {
-							out = append(out, ModelData{ID: strings.TrimPrefix(m.Name, "models/"), Name: displayName})
-						}
-						break
-					}
-				}
-			}
-			// Sort: Gemini models to the top
-			var geminiModels, otherModels []ModelData
-			for _, m := range out {
-				if strings.Contains(m.Name, "Gemini") {
-					geminiModels = append(geminiModels, m)
-				} else {
-					otherModels = append(otherModels, m)
-				}
-			}
-			out = append(geminiModels, otherModels...)
-		}
+		out = getGeminiModelsInternal(apiKey, isAdmin)
 	} else if provider == "ollama" {
-		if resp, err := http.Get("http://localhost:11434/api/tags"); err == nil {
-			defer resp.Body.Close()
-			var res struct {
-				Models []struct {
-					Name string `json:"name"`
-				} `json:"models"`
-			}
-			json.NewDecoder(resp.Body).Decode(&res)
-			for _, m := range res.Models {
-				if m.Name == "gemma3:270m" {
-					continue // Internal model — not exposed to users
-				}
-				out = append(out, ModelData{ID: m.Name, Name: m.Name})
-			}
-		}
+		out = getOllamaModelsInternal(isAdmin)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2955,7 +3463,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleVoices(w http.ResponseWriter, r *http.Request) {
-	files, err := os.ReadDir("./piper")
+	files, err := os.ReadDir("./piper/models")
 	var out []string
 	if err == nil {
 		for _, f := range files {
@@ -2969,6 +3477,8 @@ func handleVoices(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	go startBackupRoutine()
+
 	http.HandleFunc("/auth/login", handleLogin)
 	http.HandleFunc("/auth/logout", handleLogout)
 	http.HandleFunc("/auth/callback", handleCallback)
@@ -2981,5 +3491,78 @@ func main() {
 	err := http.ListenAndServe(":3000", nil)
 	if err != nil {
 		log.Fatal("ListenAndServe: ", err)
+	}
+}
+
+func startBackupRoutine() {
+	ticker := time.NewTicker(24 * time.Hour)
+	go func() {
+		// Run once immediately on startup
+		runBackups()
+		for range ticker.C {
+			runBackups()
+		}
+	}()
+}
+
+func runBackups() {
+	ctxDir := filepath.Join(".", "context")
+	backupDir := filepath.Join(ctxDir, "backups")
+	os.MkdirAll(backupDir, 0755)
+
+	entries, err := os.ReadDir(ctxDir)
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == "backups" {
+			continue
+		}
+		userID := entry.Name()
+		userDirPath := filepath.Join(ctxDir, userID)
+
+		// Find most recent modification time in userDirPath
+		var latestModTime time.Time
+		filepath.Walk(userDirPath, func(path string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() {
+				if info.ModTime().After(latestModTime) {
+					latestModTime = info.ModTime()
+				}
+			}
+			return nil
+		})
+
+		if latestModTime.IsZero() {
+			continue // Empty dir
+		}
+
+		// Find the most recent backup for this user
+		var latestBackupTime time.Time
+		backupEntries, err := os.ReadDir(backupDir)
+		if err == nil {
+			for _, bEntry := range backupEntries {
+				if strings.HasPrefix(bEntry.Name(), userID+"_") && strings.HasSuffix(bEntry.Name(), ".tar.gz") {
+					info, err := bEntry.Info()
+					if err == nil && info.ModTime().After(latestBackupTime) {
+						latestBackupTime = info.ModTime()
+					}
+				}
+			}
+		}
+
+		// If backup doesn't exist, or latest file is newer than latest backup
+		if latestBackupTime.IsZero() || latestModTime.After(latestBackupTime) {
+			timestamp := time.Now().Format("20060102_150405")
+			backupFilename := fmt.Sprintf("%s_%s.tar.gz", userID, timestamp)
+			backupPath := filepath.Join(backupDir, backupFilename)
+			
+			cmd := exec.Command("tar", "-czf", backupPath, "-C", ctxDir, userID)
+			if err := cmd.Run(); err != nil {
+				log.Printf("Failed to backup %s: %v", userID, err)
+			} else {
+				log.Printf("Successfully backed up %s to %s", userID, backupFilename)
+			}
+		}
 	}
 }

@@ -9,12 +9,12 @@
 	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 	<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 	<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <application
         android:allowBackup="true"
         android:label="Speax"
         android:supportsRtl="true"
         android:icon="@mipmap/ic_launcher"
-        android:extractNativeLibs="true"
 		android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
         android:usesCleartextTraffic="true"> <!-- Needed if talking to local http/ws -->
@@ -33,6 +33,11 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="speax" android:host="callback" />
             </intent-filter>
+            <!-- Intent filter for Assistant trigger -->
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
         
         <service
@@ -47,6 +52,25 @@
 		        <action android:name="android.intent.action.MEDIA_BUTTON" />
 		    </intent-filter>
 		</receiver>
+
+        <!-- Digital Assistant Services -->
+        <service
+            android:name=".AlyxVoiceInteractionService"
+            android:label="Speax"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true">
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/voice_interaction_service" />
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".AlyxVoiceInteractionSessionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true" />
 		
     </application>
 </manifest>
