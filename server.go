@@ -498,6 +498,9 @@ type Persona struct {
 	InteractionStyle      string       `json:"interaction_style"`
 	Constraints           string       `json:"constraints"`
 	VoiceFile             string       `json:"voice_file"`
+	VoiceNoiseScale      float64      `json:"voice_noise_scale,omitempty"`
+	VoiceLengthScale     float64      `json:"voice_length_scale,omitempty"`
+	VoiceNoiseW          float64      `json:"voice_noise_w,omitempty"`
 	Theme                 PersonaTheme `json:"theme"`
 }
 
@@ -3119,40 +3122,58 @@ func getOllamaModelsInternal(isAdmin bool) []ModelData {
 
 	configMutex.RLock()
 	chatURLs := config.OllamaChatURL
+	inclusionList := config.OllamaModels
 	configMutex.RUnlock()
 
 	if len(chatURLs) == 0 {
 		return out
 	}
 
-	// Derive /api/tags URL from /api/chat URL
-	baseURL := chatURLs[0]
-	tagsURL := strings.Replace(baseURL, "/chat", "/tags", 1)
+	client := &http.Client{Timeout: 5 * time.Second}
 
-	resp, err := http.Get(tagsURL)
-	if err == nil {
+	for _, baseURL := range chatURLs {
+		var tagsURL string
+		parsedURL, parseErr := url.Parse(baseURL)
+		if parseErr == nil && parsedURL.Scheme != "" && parsedURL.Host != "" {
+			tagsURL = parsedURL.Scheme + "://" + parsedURL.Host + "/api/tags"
+		} else {
+			// Fallback: simple string replacement if URL parsing fails
+			tagsURL = strings.Replace(baseURL, "/chat", "/tags", 1)
+		}
+
+		resp, err := client.Get(tagsURL)
+		if err != nil {
+			log.Printf("[Ollama] Failed to check tags at %s: %v", tagsURL, err)
+			continue
+		}
 		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("[Ollama] Tags request to %s returned status %s", tagsURL, resp.Status)
+			continue
+		}
+
 		var res struct {
 			Models []struct {
 				Name string `json:"name"`
 			} `json:"models"`
 		}
-		json.NewDecoder(resp.Body).Decode(&res)
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			log.Printf("[Ollama] Failed to parse Ollama tags from %s: %v", tagsURL, err)
+			continue
+		}
+
 		for _, m := range res.Models {
 			if !isAdmin {
 				if m.Name == "gemma3:270m" {
 					continue // Internal model — not exposed to regular users
 				}
 
-				configMutex.RLock()
-				inclusionList := config.OllamaModels
-				configMutex.RUnlock()
-
 				if len(inclusionList) > 0 {
 					found := false
 					for _, allowed := range inclusionList {
-						// Exact match only as requested
-						if m.Name == allowed {
+						// Relaxed match: allow "llama3" to match "llama3:latest"
+						if m.Name == allowed || strings.HasPrefix(m.Name, allowed+":") {
 							found = true
 							break
 						}
@@ -3162,7 +3183,18 @@ func getOllamaModelsInternal(isAdmin bool) []ModelData {
 					}
 				}
 			}
-			out = append(out, ModelData{ID: m.Name, Name: m.Name})
+
+			// Deduplicate models across multiple servers
+			exists := false
+			for _, existing := range out {
+				if existing.ID == m.Name {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				out = append(out, ModelData{ID: m.Name, Name: m.Name})
+			}
 		}
 	}
 	return out
@@ -4751,7 +4783,50 @@ func queryTTS(text string, voice string, userName string, personaName string, ph
 	piperBin := config.PiperBin
 	configMutex.RUnlock()
 
-	cmd := exec.Command(piperBin, "--model", modelPath, "-f", "-")
+	// Default piper values
+	noiseScale := 0.667
+	lengthScale := 0.85
+	noiseW := 0.8
+
+	personasMutex.RLock()
+	if p, ok := personas[personaNameLower]; ok {
+		if p.VoiceNoiseScale != 0 {
+			noiseScale = p.VoiceNoiseScale
+		}
+		if p.VoiceLengthScale != 0 {
+			lengthScale = p.VoiceLengthScale
+		}
+		if p.VoiceNoiseW != 0 {
+			noiseW = p.VoiceNoiseW
+		}
+	}
+	personasMutex.RUnlock()
+
+	// Add random variation of +/- 0.08 for natural vocalisation
+	randomVar := func(base float64) float64 {
+		b := make([]byte, 8)
+		if _, err := rand.Read(b); err != nil {
+			return base
+		}
+		// Convert to 0..1 then map to -0.08..0.08
+		v := float64(binary.LittleEndian.Uint64(b)) / float64(1<<64)
+		newVal := base + (v*0.16) - 0.08
+		if newVal < 0.01 {
+			newVal = 0.01
+		}
+		return newVal
+	}
+
+	noiseScale = randomVar(noiseScale)
+	// lengthScale = randomVar(lengthScale)
+	noiseW = randomVar(noiseW)
+
+	cmd := exec.Command(piperBin,
+		"--model", modelPath,
+		"--noise_scale", fmt.Sprintf("%f", noiseScale),
+		"--length_scale", fmt.Sprintf("%f", lengthScale),
+		"--noise_w", fmt.Sprintf("%f", noiseW),
+		"-f", "-")
 
 	// Feed our text into Piper's standard input
 	cmd.Stdin = strings.NewReader(text)
