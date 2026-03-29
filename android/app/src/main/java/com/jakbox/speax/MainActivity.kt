@@ -65,6 +65,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -570,6 +571,7 @@ class MainActivity : ComponentActivity() {
             if (useNativeStt) restartNativeListening()
         }
 
+        SpeaxManager.syncRecordingState()
         updateBackgroundService()
         updateMediaSessionState()
         updateWakeLocks()
@@ -1041,10 +1043,33 @@ fun ChatScreen() {
                         Text("+ New Thread")
                     }
                     Spacer(modifier = Modifier.height(16.dp))
-                    LazyColumn {
-                        items(mainActivity.availableThreads) { t ->
+
+                    var threadTabState by remember { mutableStateOf(0) }
+                    TabRow(selectedTabIndex = threadTabState, containerColor = Color.Transparent) {
+                        Tab(selected = threadTabState == 0, onClick = { threadTabState = 0 }) {
+                            Text("General", modifier = Modifier.padding(12.dp), fontSize = 14.sp)
+                        }
+                        Tab(selected = threadTabState == 1, onClick = { threadTabState = 1 }) {
+                            Text("Assistant", modifier = Modifier.padding(12.dp), fontSize = 14.sp)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
+                        val filteredThreads = mainActivity.availableThreads.filter { t ->
+                            if (threadTabState == 0) !t.id.startsWith("assistant/")
+                            else t.id.startsWith("assistant/")
+                        }
+                        if (filteredThreads.isEmpty()) {
+                            item {
+                                Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                                    Text("No threads found", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                                }
+                            }
+                        }
+                        items(filteredThreads) { t ->
                             Row(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 TextButton(
@@ -1053,8 +1078,10 @@ fun ChatScreen() {
                                 ) {
                                     Text(
                                         text = t.name,
-                                                    color = if (t.id == mainActivity.activeThreadId) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface,
-                                        modifier = Modifier.fillMaxWidth()
+                                        color = if (t.id == mainActivity.activeThreadId) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                                 TextButton(onClick = { mainActivity.deleteThread(t.id) }) {
@@ -1063,6 +1090,7 @@ fun ChatScreen() {
                             }
                         }
                     }
+
                     Spacer(modifier = Modifier.height(48.dp)) // Padding for bottom edge
                 }
             }

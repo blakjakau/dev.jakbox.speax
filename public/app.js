@@ -27,6 +27,9 @@ let isPaused = false;
 let speechStartTime = 0; // Recorded when VAD trips
 let lastSummaryData = { estTokens: 0, maxTokens: 8192, archiveTurns: 0, maxArchiveTurns: 250, text: "No summary generated yet." };
 let lastTokenUsage = {};
+let currentThreadsTab = 'general';
+let lastThreadsData = { activeId: 'default', threads: [] };
+
 
 // Web STT Engine States
 let recognition = null;
@@ -137,6 +140,70 @@ const newThreadBtn = document.getElementById('newThreadBtn');
 const threadList = document.getElementById('threadList');
 const threadNameInput = document.getElementById('threadNameInput');
 const drawerOverlay = document.getElementById('drawerOverlay');
+
+const btnTabGeneral = document.getElementById('btnTabGeneral');
+const btnTabAssistant = document.getElementById('btnTabAssistant');
+
+function updateThreadTabsUI() {
+    if (currentThreadsTab === 'general') {
+        btnTabGeneral.style.background = 'var(--teal-electric)';
+        btnTabGeneral.style.color = '#000';
+        btnTabAssistant.style.background = 'transparent';
+        btnTabAssistant.style.color = 'var(--text-soft)';
+    } else {
+        btnTabAssistant.style.background = 'var(--teal-electric)';
+        btnTabAssistant.style.color = '#000';
+        btnTabGeneral.style.background = 'transparent';
+        btnTabGeneral.style.color = 'var(--text-soft)';
+    }
+    renderThreads();
+}
+
+if (btnTabGeneral) btnTabGeneral.onclick = () => { currentThreadsTab = 'general'; updateThreadTabsUI(); };
+if (btnTabAssistant) btnTabAssistant.onclick = () => { currentThreadsTab = 'assistant'; updateThreadTabsUI(); };
+
+function renderThreads() {
+    if (!lastThreadsData) return;
+    const { activeId, threads } = lastThreadsData;
+
+    // Sort all threads by createdAt descending
+    const sortedThreads = [...threads].sort((a, b) => {
+        const dateA = a.createdAt || '';
+        const dateB = b.createdAt || '';
+        return dateB.localeCompare(dateA);
+    });
+
+    threadList.innerHTML = '';
+    sortedThreads.forEach(t => {
+        const isAssistant = t.id.startsWith('assistant/');
+        if (currentThreadsTab === 'assistant' && !isAssistant) return;
+        if (currentThreadsTab === 'general' && isAssistant) return;
+
+        const btn = document.createElement('div');
+        btn.className = `thread-item ${t.id === activeId ? 'active' : ''}`;
+
+        const nameSpan = document.createElement('span');
+        nameSpan.innerText = t.name;
+        nameSpan.style.flexGrow = '1';
+        nameSpan.onclick = () => {
+            if (t.id !== activeId) serverClient.sendSwitchThread(t.id);
+            closeDrawers();
+        };
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'btn-del-circle';
+        delBtn.innerText = 'X';
+        delBtn.onclick = (e) => {
+            e.stopPropagation();
+            if (confirm('Delete this thread?')) serverClient.sendDeleteThread(t.id);
+        };
+
+        btn.appendChild(nameSpan);
+        btn.appendChild(delBtn);
+        threadList.appendChild(btn);
+    });
+}
+
 
 const settingsSidebar = document.getElementById('settingsSidebar');
 const closeSettingsBtn = document.getElementById('closeSettingsBtn');
@@ -791,35 +858,13 @@ serverClient = new ServerClient(
             }
         },
         onThreadsSync: (data) => {
+            lastThreadsData = data;
             const safeThreads = data.threads || [];
             threadNameInput.value = safeThreads.find(t => t.id === data.activeId)?.name || 'General Chat';
-            threadList.innerHTML = '';
-            safeThreads.forEach(t => {
-                const btn = document.createElement('div');
-                btn.className = `thread-item ${t.id === data.activeId ? 'active' : ''}`;
-
-                const nameSpan = document.createElement('span');
-                nameSpan.innerText = t.name;
-                nameSpan.style.flexGrow = '1';
-                nameSpan.onclick = () => {
-                    if (t.id !== data.activeId) serverClient.sendSwitchThread(t.id);
-                    closeDrawers();
-                };
-
-                const delBtn = document.createElement('button');
-                delBtn.className = 'btn-del-circle';
-                delBtn.innerText = 'X';
-                delBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    if (confirm('Delete this thread?')) serverClient.sendDeleteThread(t.id);
-                };
-
-                btn.appendChild(nameSpan);
-                btn.appendChild(delBtn);
-                threadList.appendChild(btn);
-            });
+            renderThreads();
             memoryManager.updateThreads(data.activeId, safeThreads);
         },
+
         onHistorySync: (data) => {
             const prevScrollTop = transcript.scrollTop;
             const wasAtBottom = transcript.scrollHeight - transcript.scrollTop <= transcript.clientHeight + 50;

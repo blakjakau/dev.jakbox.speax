@@ -58,6 +58,9 @@ class AudioEngine(
             field = value
             nativeAudioEngine?.setPlaybackActive(value)
         }
+    
+    var isRecording = false
+        private set
 
     private var nativeAudioEngine: NativeAudioEngine? = null
 
@@ -93,10 +96,22 @@ class AudioEngine(
 
     @SuppressLint("MissingPermission")
     fun startRecording() {
+        if (isRecording) {
+            Log.d("AudioEngine", "startRecording: Already recording, skipping re-init.")
+            return
+        }
+        
         Log.d("AudioEngine", "Starting recording with profile=$micProfile, threshold=$noiseThreshold, muted=$isMicMuted")
         
         // Safety: Ensure any previous session is stopped first
         nativeAudioEngine?.stop()
+        
+        // Give the OS a moment to fully release the hardware resource
+        try {
+            Thread.sleep(100)
+        } catch (e: InterruptedException) {
+            // ignore
+        }
         
         nativeAudioEngine?.setProfile(micProfile)
         nativeAudioEngine?.setThreshold(noiseThreshold)
@@ -110,6 +125,7 @@ class AudioEngine(
             val result = nativeAudioEngine?.start() ?: -1
             if (result == 0) {
                 Log.d("AudioEngine", "Native audio engine started successfully.")
+                isRecording = true
                 break
             }
             
@@ -130,6 +146,7 @@ class AudioEngine(
 
     fun stopRecording() {
         Log.d("AudioEngine", "Stopping recording (current profile=$micProfile)")
+        isRecording = false
         nativeAudioEngine?.stop()
     }
 
@@ -138,6 +155,7 @@ class AudioEngine(
     }
 
     fun release() {
+        isRecording = false
         nativeAudioEngine?.release()
         nativeAudioEngine = null
     }

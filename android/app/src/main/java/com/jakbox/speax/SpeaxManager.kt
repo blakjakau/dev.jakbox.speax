@@ -16,7 +16,8 @@ import org.json.JSONObject
 import com.k2fsa.sherpa.onnx.*
 
 data class UiMessage(val role: String, val content: String)
-data class ThreadItem(val id: String, val name: String)
+data class ThreadItem(val id: String, val name: String, val createdAt: String = "")
+
 data class SpeaxThemeData(
     val primary: String,
     val secondary: String,
@@ -41,6 +42,18 @@ object SpeaxManager {
     
     // Observable states for UI
     var isConnected by mutableStateOf(false)
+    private var _isAssistantMode by mutableStateOf(false)
+    var isAssistantMode: Boolean
+        get() = _isAssistantMode
+        set(value) {
+            if (_isAssistantMode != value) {
+                _isAssistantMode = value
+                speaxWebSocket?.sendText("[SET_ASSISTANT:$value]")
+            }
+        }
+
+
+
     var statusText by mutableStateOf("Disconnected")
     var currentRms by mutableStateOf(0f)
     var aiRms by mutableStateOf(0f)
@@ -356,10 +369,7 @@ object SpeaxManager {
                     // before we aggressively jam the mic open!
                     CoroutineScope(Dispatchers.IO).launch {
                         kotlinx.coroutines.delay(300) 
-                        if (isConnected && !isMicMuted && !useNativeStt) {
-                            Log.d("SpeaxManager", "Auto-starting recording on connection.")
-                            audioEngine.startRecording()
-                        }
+                        syncRecordingState()
                     }
                 }
             },
@@ -367,7 +377,7 @@ object SpeaxManager {
                 if (ws === speaxWebSocket) {
                     isConnected = false
                     statusText = "Disconnected"
-                    audioEngine.stopRecording()
+                    syncRecordingState()
                     
                     val now = System.currentTimeMillis()
                     if (now - lastToneTime > 2000) {
@@ -395,7 +405,7 @@ object SpeaxManager {
         speaxWebSocket?.disconnect()
         isConnected = false
         statusText = "Disconnected"
-        audioEngine.stopRecording()
+        syncRecordingState()
         
         cpuWakeLock?.let {
             if (it.isHeld) it.release()
@@ -450,11 +460,7 @@ object SpeaxManager {
         isMicMuted = !isMicMuted
         audioEngine.isMicMuted = isMicMuted
         Log.d("SpeaxManager", "toggleMicMute: isMicMuted=$isMicMuted")
-        
-        if (isConnected && !isMicMuted && !isAiPaused && !useNativeStt) {
-            Log.d("SpeaxManager", "Unmuted while connected/unpaused: starting mic.")
-            audioEngine.startRecording()
-        }
+        syncRecordingState()
     }
     
     fun toggleAiPause() {
@@ -463,15 +469,23 @@ object SpeaxManager {
         if (isAiPaused) {
             speaxWebSocket?.sendText("[PAUSE]")
             audioEngine.suspendPlayback()
-            // Optional: for maximum battery savings, we could also stop recording here,
-            // but for now we'll rely on the [PAUSE] command we send to the server.
         } else {
             speaxWebSocket?.sendText("[RESUME]")
             audioEngine.resumePlayback()
-            if (isConnected && !isMicMuted && !useNativeStt) {
-                Log.d("SpeaxManager", "Unpaused while connected/unmuted: starting mic.")
-                audioEngine.startRecording()
-            }
+        }
+        syncRecordingState()
+    }
+
+    /**
+     * Centralized logic to ensure the microphone hardware state matches the app's logical state.
+     */
+    fun syncRecordingState() {
+        if (isConnected && !isMicMuted && !isAiPaused && !useNativeStt) {
+            Log.d("SpeaxManager", "syncRecordingState: All conditions met, starting mic.")
+            audioEngine.startRecording()
+        } else {
+            Log.d("SpeaxManager", "syncRecordingState: Mic should be off (connected=$isConnected, muted=$isMicMuted, paused=$isAiPaused, nativeStt=$useNativeStt). Stopping.")
+            audioEngine.stopRecording()
         }
     }
     
@@ -592,12 +606,16 @@ object SpeaxManager {
                             val t = threadsArr.getJSONObject(i)
                             val id = t.optString("id")
                             val name = t.optString("name", "General Chat")
-                            parsedThreads.add(ThreadItem(id, name))
+                            val createdAt = t.optString("createdAt", "")
+                            parsedThreads.add(ThreadItem(id, name, createdAt))
                             if (id == parsedActiveId) {
                                 parsedActiveName = name
                             }
                         }
                     }
+                    // Sort assistant threads newest to oldest
+                    parsedThreads.sortByDescending { it.createdAt }
+
                     CoroutineScope(Dispatchers.Main).launch {
                         activeThreadId = parsedActiveId
                         activeThreadName = parsedActiveName
@@ -697,12 +715,15 @@ object SpeaxManager {
     fun renameThread(name: String) { speaxWebSocket?.sendText("[RENAME_THREAD]:$name") }
     
     fun sendTextPrompt(text: String) { 
-        speaxWebSocket?.sendText("[TEXT_PROMPT:${System.currentTimeMillis()}]:$text") 
+        val tag = if (isAssistantMode) "TEXT_PROMPT:${System.currentTimeMillis()}:ASSISTANT" else "TEXT_PROMPT:${System.currentTimeMillis()}"
+        speaxWebSocket?.sendText("[$tag]:$text") 
     }
     
     fun sendTypedPrompt(text: String) { 
-        speaxWebSocket?.sendText("[TYPED_PROMPT:${System.currentTimeMillis()}]:$text") 
+        val tag = if (isAssistantMode) "TYPED_PROMPT:${System.currentTimeMillis()}:ASSISTANT" else "TYPED_PROMPT:${System.currentTimeMillis()}"
+        speaxWebSocket?.sendText("[$tag]:$text") 
     }
+
     
     fun deleteMessage(index: Int) {
         speaxWebSocket?.sendText("[DELETE_MSG]:$index")

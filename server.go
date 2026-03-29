@@ -601,7 +601,9 @@ type Thread struct {
 	Archive     []ChatMessage `json:"archive"`
 	Summary     string        `json:"summary"`
 	ToolHistory []ChatMessage `json:"-"` // Stored separately in system_[name].json
+	CreatedAt   time.Time     `json:"createdAt"`
 }
+
 
 type ToolAction struct {
 	Name        string                 `json:"name"`
@@ -626,6 +628,8 @@ type ClientSession struct {
 	Threads        map[string]*Thread `json:"threads"`
 	ActiveThreadID string             `json:"activeThreadId"`
 	SystemLog      []ChatMessage      `json:"systemLog"`
+	IsAssistant    bool               `json:"isAssistant"`
+
 
 	// Legacy fields (kept for automatic migration on load)
 	History []ChatMessage `json:"history,omitempty"`
@@ -754,12 +758,17 @@ func (s *ClientSession) appendNativeToolResult(nativeName string, result string,
 func (s *ClientSession) getLLMContext(thread *Thread, supportsTools bool) []ChatMessage {
 	var ctxMsgs []ChatMessage
 
-	// 1. Collect last 20 from SystemLog
-	startIdx := len(s.SystemLog) - 20
-	if startIdx < 0 {
-		startIdx = 0
+	isAssistantThread := strings.HasPrefix(thread.ID, "assistant/")
+
+	// 1. Collect last 20 from SystemLog (skip for assistant threads to keep them clean)
+	if !isAssistantThread {
+		startIdx := len(s.SystemLog) - 20
+		if startIdx < 0 {
+			startIdx = 0
+		}
+		ctxMsgs = append(ctxMsgs, s.SystemLog[startIdx:]...)
 	}
-	ctxMsgs = append(ctxMsgs, s.SystemLog[startIdx:]...)
+
 
 	// 2. Map results by ID for deterministic matching.
 	resultsByID := make(map[string]ChatMessage)
@@ -779,16 +788,19 @@ func (s *ClientSession) getLLMContext(thread *Thread, supportsTools bool) []Chat
 	var historyWithoutTools []ChatMessage
 
 	for _, m := range thread.History {
-		if m.ToolCall != nil && supportsTools {
-			if res, ok := resultsByID[m.ToolCall.ID]; ok {
-				pairs = append(pairs, toolPair{call: m, result: res})
+		if m.ToolCall != nil || m.ToolResult != nil {
+			if supportsTools && m.ToolCall != nil {
+				if res, ok := resultsByID[m.ToolCall.ID]; ok {
+					pairs = append(pairs, toolPair{call: m, result: res})
+				}
 			}
-			// Strict exclusion: if it was a tool call (paired or not), we skip regular history append.
-			// Unpaired calls are effectively removed from the context.
-			continue
-		}
-		// If it's a tool-related result turn in history (unlikely pattern but safe)
-		if m.ToolResult != nil {
+			// If tools are not supported, we include the message as plain text
+			// (stripping the structured fields) to preserve conversational context.
+			if !supportsTools && m.ToolCall != nil {
+				m.ToolCall = nil
+				historyWithoutTools = append(historyWithoutTools, m)
+			}
+			// We always skip the direct append and the ToolResult turns (which are handled via pairing)
 			continue
 		}
 		// Otherwise keep as regular history
@@ -821,7 +833,8 @@ func (s *ClientSession) getLLMContext(thread *Thread, supportsTools bool) []Chat
 		return ctxMsgs[i].Timestamp.Before(ctxMsgs[j].Timestamp)
 	})
 
-	// 7. Post-process to fix interjecting system messages
+	// 7. Ensure role alternation and that we start with 'user'.
+	// Gemini is extremely strict about the first role being 'user' and roles alternating.
 	var finalized []ChatMessage
 	var systemBuffer []ChatMessage
 	var inToolSequence bool
@@ -852,6 +865,22 @@ func (s *ClientSession) getLLMContext(thread *Thread, supportsTools bool) []Chat
 
 	if len(systemBuffer) > 0 {
 		finalized = append(finalized, systemBuffer...)
+	}
+
+	// TRIMMING/FIXUP: Ensure the first turn is 'user'
+	firstValidIdx := -1
+	for i, m := range finalized {
+		if m.Role == "user" {
+			firstValidIdx = i
+			break
+		}
+	}
+	if firstValidIdx == -1 {
+		// No user turns at all? Prepend a dummy one.
+		finalized = append([]ChatMessage{{Role: "user", Content: "[System: Session started]", Timestamp: time.Now().Add(-1 * time.Hour)}}, finalized...)
+	} else if firstValidIdx > 0 {
+		// Drop everything before the first user turn (e.g. dangling model/function turns)
+		finalized = finalized[firstValidIdx:]
 	}
 
 	return finalized
@@ -1102,8 +1131,82 @@ func getConfigPath(clientID string) string {
 }
 
 func getThreadPath(clientID string, sanitizedName string, shortID string) string {
+	if strings.HasPrefix(shortID, "assistant/") {
+		subDir := filepath.Join(getContextDir(clientID), "assistant")
+		os.MkdirAll(subDir, 0755)
+		// Strip assistant/ prefix for file naming
+		actualID := strings.TrimPrefix(shortID, "assistant/")
+		return filepath.Join(subDir, fmt.Sprintf("chat-%s-%s.json", sanitizedName, actualID))
+	}
 	return filepath.Join(getContextDir(clientID), fmt.Sprintf("chat-%s-%s.json", sanitizedName, shortID))
 }
+
+func generateThreadTopic(prompt string) string {
+	configMutex.RLock()
+	fbURL := config.FallbackLLM.URL
+	fbModels := config.FallbackLLM.Models
+	configMutex.RUnlock()
+
+	if fbURL == "" || len(fbModels) == 0 {
+		return "Assistant Chat"
+	}
+
+	topicPrompt := fmt.Sprintf("Analyze this user request and provide a concise 3-4 word topic title for a chat thread. Provide ONLY the title text, no quotes, no periods, no preamble. User request: %s", prompt)
+
+	payload := map[string]interface{}{
+		"model":  fbModels[0],
+		"prompt": topicPrompt,
+		"stream": false,
+	}
+
+	isChat := strings.Contains(fbURL, "/chat")
+	if isChat {
+		payload = map[string]interface{}{
+			"model": fbModels[0],
+			"messages": []map[string]string{
+				{"role": "user", "content": topicPrompt},
+			},
+			"stream": false,
+		}
+	}
+
+	body, _ := json.Marshal(payload)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(fbURL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[Assistant] Failed to call FallbackLLM for topic generation: %v", err)
+		return "Assistant Chat"
+	}
+	defer resp.Body.Close()
+
+	var res struct {
+		Response string `json:"response"`
+		Message  struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		log.Printf("[Assistant] Failed to parse topic generation response: %v", err)
+		return "Assistant Chat"
+	}
+
+	topic := res.Response
+	if isChat {
+		topic = res.Message.Content
+	}
+
+	topic = strings.TrimSpace(topic)
+	topic = strings.Trim(topic, "\"`.*")
+	if topic == "" {
+		topic = "Assistant Chat"
+	}
+	if len(topic) > 50 {
+		topic = topic[:47] + "..."
+	}
+	return topic
+}
+
 
 func sanitizeTitle(title string) string {
 	reg, _ := regexp.Compile("[^a-zA-Z0-9]+")
@@ -1137,20 +1240,23 @@ func loadSession(clientID string) *ClientSession {
 
 	// Load threads
 	ctxDir := getContextDir(clientID)
-	entries, err := os.ReadDir(ctxDir)
-	if err == nil {
+	loadFromDir := func(dir string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
 		for _, entry := range entries {
 			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") ||
 				!strings.HasPrefix(entry.Name(), "chat-") {
 				continue
 			}
-			threadData, err := os.ReadFile(filepath.Join(ctxDir, entry.Name()))
+			threadData, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 			if err == nil {
 				var t Thread
 				if err := json.Unmarshal(threadData, &t); err == nil && t.ID != "" {
 					// Try to load per-thread tool history from matching system-... file
 					sysFileName := "system-" + strings.TrimPrefix(entry.Name(), "chat-")
-					sysData, err := os.ReadFile(filepath.Join(ctxDir, sysFileName))
+					sysData, err := os.ReadFile(filepath.Join(dir, sysFileName))
 					if err == nil {
 						var toolHistory []ChatMessage
 						if json.Unmarshal(sysData, &toolHistory) == nil {
@@ -1165,6 +1271,9 @@ func loadSession(clientID string) *ClientSession {
 			}
 		}
 	}
+	loadFromDir(ctxDir)
+	loadFromDir(filepath.Join(ctxDir, "assistant"))
+
 
 	// Seamless migration of legacy flat structure into Thread structure
 	if len(session.Threads) == 0 {
@@ -1172,7 +1281,9 @@ func loadSession(clientID string) *ClientSession {
 			ID: "default", Name: "General Chat",
 			History: session.History, Archive: session.Archive, Summary: session.Summary,
 			ToolHistory: []ChatMessage{},
+			CreatedAt:   time.Now(),
 		}
+
 		session.Threads["default"] = t
 		session.ActiveThreadID = "default"
 		session.History = nil
@@ -1334,31 +1445,43 @@ func saveSession(session *ClientSession) {
 	for threadID, t := range session.Threads {
 		sanitized := sanitizeTitle(t.Name)
 		shortID := threadID
-		if len(shortID) > 6 && shortID != "default" {
+		if len(shortID) > 6 && !strings.HasPrefix(shortID, "assistant/") && shortID != "default" {
 			shortID = shortID[:6]
 		}
 
-		chatFileName := fmt.Sprintf("chat-%s-%s.json", sanitized, shortID)
-		sysFileName := fmt.Sprintf("system-%s-%s.json", sanitized, shortID)
-		activeFiles[chatFileName] = true
-		activeFiles["event-log.json"] = true
+		chatPath := getThreadPath(session.ClientID, sanitized, shortID)
+		chatFileName := filepath.Base(chatPath)
+
+		// Track relative path for cleanup logic
+		relPath := chatFileName
+		if strings.HasPrefix(shortID, "assistant/") {
+			relPath = filepath.Join("assistant", chatFileName)
+		}
+		activeFiles[relPath] = true
 
 		// Save tool history separately; omit field when serializing chat
 		originalToolHistory := t.ToolHistory
 		t.ToolHistory = nil
 		if data, err := json.MarshalIndent(t, "", "  "); err == nil {
-			os.WriteFile(filepath.Join(ctxDir, chatFileName), data, 0644)
+			os.WriteFile(chatPath, data, 0644)
 		}
 		t.ToolHistory = originalToolHistory
 
-		// Write or delete system_... file
+		// Handle system history file
+		sysPath := strings.Replace(chatPath, "chat-", "system-", 1)
+		sysFileName := filepath.Base(sysPath)
+		sysRelPath := sysFileName
+		if strings.HasPrefix(shortID, "assistant/") {
+			sysRelPath = filepath.Join("assistant", sysFileName)
+		}
+
 		if len(originalToolHistory) > 0 {
-			activeFiles[sysFileName] = true
+			activeFiles[sysRelPath] = true
 			if sysData, err := json.MarshalIndent(originalToolHistory, "", "  "); err == nil {
-				os.WriteFile(filepath.Join(ctxDir, sysFileName), sysData, 0644)
+				os.WriteFile(sysPath, sysData, 0644)
 			}
 		} else {
-			os.Remove(filepath.Join(ctxDir, sysFileName))
+			os.Remove(sysPath)
 		}
 	}
 
@@ -1382,15 +1505,24 @@ func saveSession(session *ClientSession) {
 	session.Threads = originalThreads
 	session.SystemLog = originalSystemLog
 
-	// Cleanup old thread files
-	if entries, err := os.ReadDir(ctxDir); err == nil {
-		for _, entry := range entries {
-			if !entry.IsDir() && !activeFiles[entry.Name()] && strings.HasSuffix(entry.Name(), ".json") {
-				os.Remove(filepath.Join(ctxDir, entry.Name()))
+	// Cleanup old thread files (including in assistant/ subfolder)
+	cleanupDir := func(dir string, prefix string) {
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				fullRel := filepath.Join(prefix, entry.Name())
+				if !activeFiles[fullRel] && strings.HasSuffix(entry.Name(), ".json") {
+					os.Remove(filepath.Join(dir, entry.Name()))
+				}
 			}
 		}
 	}
+	cleanupDir(ctxDir, "")
+	cleanupDir(filepath.Join(ctxDir, "assistant"), "assistant")
 }
+
 
 func trackTokens(session *ClientSession, key string, tokens int64) {
 	if tokens <= 0 {
@@ -2131,7 +2263,29 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			if strings.HasPrefix(text, "[SET_ASSISTANT:") {
+				isAssistant := strings.Contains(text, "true")
+				session.Mutex.Lock()
+				wasAssistant := session.IsAssistant
+				session.IsAssistant = isAssistant
+
+				// If we are starting a NEW assistant session, switch away from any previous assistant thread
+				// so that streamLLMAndTTS will correctly trigger a new topic-labeled thread for this session.
+				if isAssistant && !wasAssistant {
+					if strings.HasPrefix(session.ActiveThreadID, "assistant/") {
+						session.ActiveThreadID = "default"
+						log.Printf("[Assistant] Resetting active thread to default for new assistant session.")
+					}
+				}
+				session.Mutex.Unlock()
+				log.Printf("[Assistant] Session IsAssistant sticky flag set to: %v", isAssistant)
+				continue
+			}
+
+
+
 			if strings.HasPrefix(text, "[SETTINGS]") {
+
 				var settings struct {
 					UserName         string `json:"userName"`
 					GoogleName       string `json:"googleName"`
@@ -2229,6 +2383,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 
+					isAssistant := strings.Contains(tagContent, "ASSISTANT")
 					shouldProcess := isTyped || shouldProcessPrompt(session, content, baseTime)
 
 					if shouldProcess {
@@ -2238,6 +2393,18 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 							session.Mutex.Unlock()
 							log.Printf("[RUMBLE] Manual typed prompt received. Forcing Passive Assistant into Active mode.")
 						}
+
+						if isAssistant {
+							session.Mutex.Lock()
+							if !session.IsAssistant {
+								log.Printf("[Assistant] ASSISTANT flag detected in prompt tag. Enabling session sticky flag.")
+								session.IsAssistant = true
+							}
+							session.Mutex.Unlock()
+						}
+
+
+
 						go func(p string, bt time.Time) {
 							session.Mutex.Lock()
 							if session.ActiveCancel != nil {
@@ -2353,8 +2520,13 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			baseTime := time.Unix(0, startTimeMs*int64(time.Millisecond))
 
 			// Process the complete phrase sent by the client
-			go func(audio []byte, bt time.Time) {
+			session.Mutex.Lock()
+			isAssAtStart := session.IsAssistant
+			session.Mutex.Unlock()
+
+			go func(audio []byte, bt time.Time, isA bool) {
 				text, err := queryWhisper(audio, session)
+
 				if err != nil {
 					if err == ErrNoHealthyNodes {
 						session.Mutex.Lock()
@@ -2399,14 +2571,18 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 					sendOrBroadcastText(nil, session, []byte("[CHAT]:"+text))
 
+					if isA {
+						text += " :ASSISTANT"
+					}
 					if err := streamLLMAndTTS(ctx, text, ws, session); err != nil {
+
 						log.Println("LLM stream error:", err)
 					}
 					log.Println("[LLM] Stream complete.")
 				} else {
 					safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
 				}
-			}(audioData, baseTime)
+			}(audioData, baseTime, isAssAtStart)
 		}
 	}
 }
@@ -3291,8 +3467,48 @@ func prepareLLMHistory(msgs []ChatMessage, provider string) []ChatMessage {
 func streamLLMAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession) error {
 	session.TurnMutex.Lock()
 	defer session.TurnMutex.Unlock()
+
+	// Ensure we are in an assistant thread if session.IsAssistant is true
+	session.Mutex.Lock()
+	isAss := session.IsAssistant || strings.Contains(prompt, ":ASSISTANT")
+	t := session.ActiveThread()
+
+	needsSwitch := isAss && !strings.HasPrefix(t.ID, "assistant/")
+	if isAss {
+		log.Printf("[Assistant] streamLLMAndTTS: IsAssistant=true active_thread=%s needs_switch=%v", t.ID, needsSwitch)
+	}
+	session.Mutex.Unlock()
+
+	if needsSwitch {
+		log.Printf("[Assistant] Assistant mode active but current thread is not an assistant thread. Generating topic for new thread...")
+		topic := generateThreadTopic(prompt)
+		shouldSync := false
+		session.Mutex.Lock()
+		// Re-check after generating topic (which might have taken time)
+		t = session.ActiveThread()
+		if session.IsAssistant && !strings.HasPrefix(t.ID, "assistant/") {
+			newID := "assistant/chat_" + generateID()
+			log.Printf("[Assistant] Creating new assistant thread: %s (Topic: %s)", newID, topic)
+			session.Threads[newID] = &Thread{
+				ID:        newID,
+				Name:      topic,
+				CreatedAt: time.Now(),
+			}
+			session.ActiveThreadID = newID
+			shouldSync = true
+		}
+		session.Mutex.Unlock()
+		if shouldSync {
+			sendThreads(nil, session)
+		}
+
+	}
+
+
+
 	return streamLLMAndTTSInternal(ctx, prompt, ws, session, false)
 }
+
 
 func streamLLMAndTTSInternal(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession, isFallback bool) error {
 	// Per-client per-model rate limiting
@@ -4087,7 +4303,8 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			}
 			break
 		}
-		log.Printf("[Ollama] Chunk: done=%v content=%q tool_calls=%d", result.Done, result.Message.Content, len(result.Message.ToolCalls))
+		// log.Printf("[Ollama] Chunk: done=%v content=%q tool_calls=%d", result.Done, result.Message.Content, len(result.Message.ToolCalls))
+
 		if len(result.Message.ToolCalls) > 0 {
 			for _, tc := range result.Message.ToolCalls {
 				log.Printf("[Ollama] Detected native tool call: %s", tc.Function.Name)

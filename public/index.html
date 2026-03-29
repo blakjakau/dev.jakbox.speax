@@ -165,7 +165,12 @@
             <h2 style="color: var(--teal-electric);">Your Threads</h2>
             <button id="closeThreadsBtn" class="btn-close">✕</button>
         </div>
-        <button id="newThreadBtn" class="btn-primary" style="margin: 0;">+ New Thread</button>
+        <div id="threadTabRow" style="display: flex; margin-bottom: 10px; background: var(--slate-dark); border-radius: 8px; padding: 4px;">
+            <button id="btnTabGeneral" style="flex: 1; padding: 8px; border: none; border-radius: 6px; background: var(--teal-electric); color: #000; cursor: pointer; font-weight: bold;">General</button>
+            <button id="btnTabAssistant" style="flex: 1; padding: 8px; border: none; border-radius: 6px; background: transparent; color: var(--text-soft); cursor: pointer; font-weight: bold;">Assistant</button>
+        </div>
+        <button id="newThreadBtn" class="btn-primary" style="margin: 0; margin-bottom: 10px;">+ New Thread</button>
+
         <div id="threadList" style="flex-grow: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 5px;">
         </div>
     </div>

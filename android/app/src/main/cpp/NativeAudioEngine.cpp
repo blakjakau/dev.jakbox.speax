@@ -112,10 +112,11 @@ public:
 
 // --- restartStream ---
 void AudioEngineContext::restartStream() {
-    LOGD("NativeAudioEngine: Auto-restarting stream after disconnect");
+    LOGD("NativeAudioEngine: Auto-restarting stream after unexpected disconnect.");
     std::lock_guard<std::mutex> lock(engineMutex);
     
     if (stream) {
+        LOGD("NativeAudioEngine: Closing old/stale stream handle...");
         AAudioStream_requestStop(stream);
         AAudioStream_close(stream);
         stream = nullptr;
@@ -473,25 +474,29 @@ Java_com_jakbox_speax_NativeAudioEngine_startRecording(JNIEnv* env, jobject obj,
 
     result = AAudioStream_requestStart(ctx->stream);
     if (result != AAUDIO_OK) {
-        LOGE("Failed to start AAudio stream: %s", AAudio_convertResultToText(result));
+        LOGE("NativeAudioEngine: Failed to start AAudio stream: %s", AAudio_convertResultToText(result));
         AAudioStream_close(ctx->stream);
         ctx->stream = nullptr;
         return (jint)result;
     }
 
-    LOGD("NativeAudioEngine: Recording started successfully");
+    LOGD("NativeAudioEngine: Recording started successfully (SampleRate: %d, SharingMode: %d)", ctx->sampleRate, AAudioStream_getSharingMode(ctx->stream));
     return (jint)AAUDIO_OK;
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_jakbox_speax_NativeAudioEngine_stopRecording(JNIEnv* env, jobject obj, jlong ptr) {
-    LOGD("NativeAudioEngine: stopRecording called");
+    LOGD("NativeAudioEngine: stopRecording called (Closing hardware handle)");
     AudioEngineContext* ctx = (AudioEngineContext*)ptr;
     std::lock_guard<std::mutex> lock(ctx->engineMutex);
     if (ctx->stream) {
-        AAudioStream_requestStop(ctx->stream);
-        AAudioStream_close(ctx->stream);
+        aaudio_result_t res = AAudioStream_requestStop(ctx->stream);
+        LOGD("NativeAudioEngine: Stream stop requested: %s", AAudio_convertResultToText(res));
+        res = AAudioStream_close(ctx->stream);
+        LOGD("NativeAudioEngine: Stream close requested: %s", AAudio_convertResultToText(res));
         ctx->stream = nullptr;
+    } else {
+        LOGD("NativeAudioEngine: stopRecording - No active stream to close.");
     }
     
     std::lock_guard<std::mutex> bLock(ctx->bufferMutex);

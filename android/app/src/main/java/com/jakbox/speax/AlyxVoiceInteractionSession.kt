@@ -62,17 +62,16 @@ class AlyxVoiceInteractionSession(context: Context) : VoiceInteractionSession(co
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
         Log.d("AlyxSession", "onShow flags=$showFlags")
+        SpeaxManager.isAssistantMode = true
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
         
         if (!SpeaxManager.isConnected) {
             SpeaxManager.connect()
-        } else if (!SpeaxManager.isMicMuted) {
+        } else {
             CoroutineScope(Dispatchers.IO).launch {
                 delay(300)
-                if (!SpeaxManager.isMicMuted) {
-                    SpeaxManager.audioEngine.startRecording()
-                }
+                SpeaxManager.syncRecordingState()
             }
         }
     }
@@ -80,10 +79,12 @@ class AlyxVoiceInteractionSession(context: Context) : VoiceInteractionSession(co
     override fun onHide() {
         super.onHide()
         Log.d("AlyxSession", "onHide")
+        SpeaxManager.isAssistantMode = false
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
-        SpeaxManager.audioEngine.stopRecording()
+        SpeaxManager.syncRecordingState()
     }
+
 
     override fun onDestroy() {
         super.onDestroy()
