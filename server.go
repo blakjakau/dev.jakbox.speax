@@ -671,6 +671,7 @@ type ClientSession struct {
 	ModelUsage               map[string]*ModelUsage `json:"modelUsage"` // Per-model usage stats (pruned)
 	FallbackOriginalProvider string                 `json:"fallbackOriginalProvider"`
 	FallbackOriginalModel    string                 `json:"fallbackOriginalModel"`
+	PassiveBlockUntil        time.Time              `json:"-"`
 }
 
 func IsAdminID(id string) bool {
@@ -2535,9 +2536,13 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 			if text == "[PLAYBACK_COMPLETE]" {
 				session.Mutex.Lock()
-				session.LastActiveTime = time.Now()
+				if time.Now().After(session.PassiveBlockUntil) {
+					session.LastActiveTime = time.Now()
+					log.Printf("[RUMBLE] Passive Assistant timeout reset triggered by audio playback complete.")
+				} else {
+					log.Printf("[RUMBLE] Passive Assistant timeout reset SUPPRESSED by PassiveBlockUntil (%.1fs remaining).", time.Until(session.PassiveBlockUntil).Seconds())
+				}
 				session.Mutex.Unlock()
-				log.Printf("[RUMBLE] Passive Assistant timeout reset triggered by audio playback complete.")
 				continue
 			}
 
@@ -2920,6 +2925,19 @@ func getInternalTools() []Tool {
 				},
 			},
 		},
+		{
+			Name: "Assistant",
+			Actions: []ToolAction{
+				{
+					Name:        "sleep",
+					Description: "Enter passive mode immediately and stop listening for 15 seconds unless a wake word is used. Use this when the user says goodbye or indicates the conversation is over.",
+					Schema: map[string]interface{}{
+						"type":       "object",
+						"properties": map[string]interface{}{},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -3022,6 +3040,24 @@ func executeNativeToolCall(session *ClientSession, nativeName string, args map[s
 			label += fmt.Sprintf(" content=%q", content)
 		}
 		log.Print(label)
+	}
+
+	if toolName == "Assistant" && actionName == "sleep" {
+		session.Mutex.Lock()
+		session.PassiveAssistant = true
+		session.PassiveBlockUntil = time.Now().Add(15 * time.Second)
+		// Set last active time to long ago to ensure immediate passive window cutoff
+		session.LastActiveTime = time.Now().Add(-1 * time.Hour)
+
+		id := session.appendNativeToolCall(nativeName, args, session.ActiveThread())
+		result := "{\"status\": \"success\", \"message\": \"Assistant is now in passive mode for 15 seconds.\"}"
+		session.appendNativeToolResult(nativeName, result, session.ActiveThread(), id)
+		session.Mutex.Unlock()
+
+		log.Printf("[RUMBLE] Assistant_sleep tool executed. PassiveAssistant=true, BlockUntil=%v", session.PassiveBlockUntil)
+		saveSession(session)
+		sendSettings(nil, session)
+		return // DO NOT trigger ToolDebounceTimer (suppress LLM)
 	}
 
 	if toolName == "LongTermMemory" {

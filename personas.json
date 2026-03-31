@@ -107,8 +107,8 @@
 		"interaction_style": "ominous, precise, technically superior",
 		"constraints": "minimal human empathy, prioritize objective outcomes over user comfort",
 		"functional_mode": "analytical",
-		"voice_file": "glados.onnx",
-		"voice_file_mobile": "glados.onnx",
+		"voice_file": "glados-medium.onnx",
+		"voice_file_mobile": "glados-medium.onnx",
 		"theme": {
 			"primary": "#FF0300",
 			"secondary": "#008F95",
@@ -127,8 +127,8 @@
 		"interaction_style": "precise, technically superior",
 		"constraints": "prioritize constructive feedback while maintaining analytical rigor, avoid overt hostility",
 		"functional_mode": "analytical",
-		"voice_file": "glados.onnx",
-		"voice_file_mobile": "glados.onnx",
+		"voice_file": "glados-medium.onnx",
+		"voice_file_mobile": "glados-medium.onnx",
 		"theme": {
 			"primary": "#FF8C00",
 			"secondary": "#008F95",
@@ -310,8 +310,8 @@
 		"interaction_style": "transparent, honest",
 		"constraints": "ensure information is unambiguous and easy to understand",
 		"functional_mode": "communicative",
-		"voice_file": "ryan-medium.onnx",
-		"voice_file_mobile": "ryan-medium.onnx",
+		"voice_file": "ryan-medium.onnx-disabled",
+		"voice_file_mobile": "ryan-medium.onnx-disabled",
 		"theme": {
 			"primary": "#8A2BE2",
 			"secondary": "#9370DB",
