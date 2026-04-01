@@ -3,7 +3,7 @@
 BINARY_NAME=piper-service
 LIB_DIR=./lib
 ESPEAK_DATA=./piper/espeak-ng-data
-PORT=8079
+PORT=4410
 
 .PHONY: all build run clean test
 

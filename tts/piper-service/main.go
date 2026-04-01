@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	port := flag.String("port", "8079", "Port to run the service on")
+	port := flag.String("port", "4410", "Port to run the service on")
 	modelsDir := flag.String("models", "./models", "Directory containing .onnx voice models")
 	espeakData := flag.String("espeak", "./piper/espeak-ng-data", "Path to eSpeak NG data directory")
 	flag.Parse()
