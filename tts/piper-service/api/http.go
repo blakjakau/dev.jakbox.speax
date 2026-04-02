@@ -64,7 +64,9 @@ func (api *API) handleTTS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "audio/wav")
-	w.Write(buf.Bytes())
+	resBytes := buf.Bytes()
+	api.Manager.RecordBytes(uint64(r.ContentLength), uint64(len(resBytes)))
+	w.Write(resBytes)
 }
 
 func writeWavHeader(w http.ResponseWriter, numSamples, sampleRate int) {
@@ -139,12 +141,13 @@ func (api *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	active, cache, totalSize := api.Manager.GetDetailedStatus()
+	active, cache, totalSize, metrics := api.Manager.GetDetailedStatus()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"active_model":                active,
-		"cached_models":               cache,
-		"total_cache_size_estimate":   totalSize,
+		"active_model":              active,
+		"cached_models":             cache,
+		"total_cache_size_estimate": totalSize,
+		"metrics":                   metrics,
 	})
 }
 

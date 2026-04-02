@@ -145,17 +145,20 @@ func (api *API) handleStream(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[WS] Command received: health")
 				health := api.GetHealthMetrics()
 				if p, err := json.Marshal(health); err == nil {
+					api.Manager.RecordBytes(0, uint64(len(p)))
 					conn.WriteMessage(websocket.TextMessage, p)
 				}
 			case "status":
 				log.Printf("[WS] Command received: status")
-				active, cache, totalSize := api.Manager.GetDetailedStatus()
+				active, cache, totalSize, metrics := api.Manager.GetDetailedStatus()
 				status := map[string]interface{}{
 					"active_model":              active,
 					"cached_models":             cache,
 					"total_cache_size_estimate": totalSize,
+					"metrics":                   metrics,
 				}
 				if p, err := json.Marshal(status); err == nil {
+					api.Manager.RecordBytes(0, uint64(len(p)))
 					conn.WriteMessage(websocket.TextMessage, p)
 				}
 			}
@@ -169,6 +172,8 @@ func (api *API) handleStream(w http.ResponseWriter, r *http.Request) {
 				ls, ns, nw, varp float32
 			}{req.Text, req.Annotated, ls, ns, nw, req.Variance}
 		}
+
+		api.Manager.RecordBytes(uint64(len(p)), 0)
 	}
 	<-done
 }
@@ -188,6 +193,7 @@ func (api *API) synthesizeAndSend(conn *websocket.Conn, text string, state *sess
 			"text": text,
 		}
 		if p, err := json.Marshal(textMap); err == nil {
+			api.Manager.RecordBytes(0, uint64(len(p)))
 			conn.WriteMessage(websocket.TextMessage, p)
 		}
 	}
@@ -208,6 +214,7 @@ func (api *API) synthesizeAndSend(conn *websocket.Conn, text string, state *sess
 				"sampleRate": api.Manager.GetSampleRate(),
 			}
 			if p, err := json.Marshal(srMap); err == nil {
+				api.Manager.RecordBytes(0, uint64(len(p)))
 				conn.WriteMessage(websocket.TextMessage, p)
 			}
 			state.firstChunkSent = true
@@ -221,7 +228,9 @@ func (api *API) synthesizeAndSend(conn *websocket.Conn, text string, state *sess
 			binary.Write(buf, binary.LittleEndian, v)
 		}
 
-		if err := conn.WriteMessage(websocket.BinaryMessage, buf.Bytes()); err != nil {
+		resBytes := buf.Bytes()
+		api.Manager.RecordBytes(0, uint64(len(resBytes)))
+		if err := conn.WriteMessage(websocket.BinaryMessage, resBytes); err != nil {
 			log.Printf("Failed to write to WS: %v", err)
 		}
 	})
@@ -230,6 +239,7 @@ func (api *API) synthesizeAndSend(conn *websocket.Conn, text string, state *sess
 		log.Printf("Streaming synthesis failed on WS: %v", err)
 		errResp := map[string]string{"error": err.Error()}
 		if p, err := json.Marshal(errResp); err == nil {
+			api.Manager.RecordBytes(0, uint64(len(p)))
 			conn.WriteMessage(websocket.TextMessage, p)
 		}
 		return
@@ -278,6 +288,7 @@ func (api *API) finalizeStream(conn *websocket.Conn, state *sessionState) {
 	}
 	endMap := map[string]interface{}{"type": "end"}
 	if p, err := json.Marshal(endMap); err == nil {
+		api.Manager.RecordBytes(0, uint64(len(p)))
 		conn.WriteMessage(websocket.TextMessage, p)
 	}
 	state.firstChunkSent = false // Reset gate for an entirely new utterance

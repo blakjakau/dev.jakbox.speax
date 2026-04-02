@@ -20,13 +20,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
 )
 
 const (
-	MaxCachedModels = 5
+	MaxCachedModels = 10
 	ModelTTL        = 10 * time.Minute
 )
 
@@ -65,13 +66,14 @@ func goAudioCallback(data *C.int16_t, length C.int, userdata unsafe.Pointer) {
 }
 
 type Engine struct {
-	context    C.PiperContext
-	modelPath  string
-	configPath string
-	size       int64
-	sampleRate int
-	lastUsed   time.Time
-	mu         sync.Mutex // Protects synthesis AND context closing
+	context           C.PiperContext
+	modelPath         string
+	configPath        string
+	size              int64
+	sampleRate        int
+	lastUsed          time.Time
+	totalAudioSeconds float64
+	mu                sync.Mutex // Protects synthesis AND context closing
 }
 
 func (e *Engine) Close() {
@@ -83,11 +85,23 @@ func (e *Engine) Close() {
 	}
 }
 
+type GlobalMetrics struct {
+	StartTime              time.Time
+	TotalUtterances        uint64
+	TotalWords             uint64
+	TotalAudioSeconds      float64
+	TotalInferenceDuration time.Duration
+	TotalRequestBytes      uint64
+	TotalResponseBytes     uint64
+	mu                     sync.Mutex
+}
+
 type Manager struct {
 	cache      map[string]*Engine
 	activeName string
 	dataPath   string // eSpeak data path
 	modelDir   string
+	metrics    GlobalMetrics
 	mu         sync.RWMutex
 }
 
@@ -96,6 +110,9 @@ func NewManager(modelDir, espeakData string) *Manager {
 		cache:    make(map[string]*Engine),
 		dataPath: espeakData,
 		modelDir: modelDir,
+		metrics: GlobalMetrics{
+			StartTime: time.Now(),
+		},
 	}
 
 	// Start background reaper
@@ -112,6 +129,13 @@ func Initialize(espeakDataPath string) {
 
 func Terminate() {
 	C.piper_terminate()
+}
+
+func (m *Manager) RecordBytes(in, out uint64) {
+	m.metrics.mu.Lock()
+	defer m.metrics.mu.Unlock()
+	m.metrics.TotalRequestBytes += in
+	m.metrics.TotalResponseBytes += out
 }
 
 func (m *Manager) reaper() {
@@ -252,6 +276,9 @@ func (m *Manager) Synthesize(text string, lengthScale, noiseScale, noiseW float3
 		return nil, errors.New("no model currently loaded")
 	}
 
+	wordCount := uint64(len(strings.Fields(text)))
+	start := time.Now()
+
 	// Double safety: update lastUsed when synthesis starts
 	activeEngine.lastUsed = time.Now()
 
@@ -274,6 +301,8 @@ func (m *Manager) Synthesize(text string, lengthScale, noiseScale, noiseW float3
 		return nil, errors.New("synthesis failed in Cgo")
 	}
 
+	duration := time.Since(start)
+
 	if length == 0 || cBuffer == nil {
 		return []int16{}, nil
 	}
@@ -283,6 +312,17 @@ func (m *Manager) Synthesize(text string, lengthScale, noiseScale, noiseW float3
 	slice := unsafe.Slice((*int16)(unsafe.Pointer(cBuffer)), length)
 	result := make([]int16, length)
 	copy(result, slice)
+
+	audioDuration := float64(length) / float64(activeEngine.sampleRate)
+	
+	// Update metrics
+	activeEngine.totalAudioSeconds += audioDuration
+	m.metrics.mu.Lock()
+	m.metrics.TotalUtterances++
+	m.metrics.TotalWords += wordCount
+	m.metrics.TotalAudioSeconds += audioDuration
+	m.metrics.TotalInferenceDuration += duration
+	m.metrics.mu.Unlock()
 
 	return result, nil
 }
@@ -297,6 +337,9 @@ func (m *Manager) SynthesizeStream(text string, lengthScale, noiseScale, noiseW 
 		return errors.New("no model currently loaded")
 	}
 
+	wordCount := uint64(len(strings.Fields(text)))
+	start := time.Now()
+
 	activeEngine.lastUsed = time.Now()
 	activeEngine.mu.Lock()
 	defer activeEngine.mu.Unlock()
@@ -308,13 +351,31 @@ func (m *Manager) SynthesizeStream(text string, lengthScale, noiseScale, noiseW 
 	cText := C.CString(text)
 	defer C.free(unsafe.Pointer(cText))
 
-	cbID := registerCallback(cb)
+	var totalSamples int
+	wrappedCB := func(samples []int16) {
+		totalSamples += len(samples)
+		cb(samples)
+	}
+
+	cbID := registerCallback(wrappedCB)
 	defer unregisterCallback(cbID)
 
 	res := C.call_stream_synth(activeEngine.context, cText, unsafe.Pointer(cbID), C.float(lengthScale), C.float(noiseScale), C.float(noiseW))
 	if res != 0 {
 		return errors.New("streaming synthesis failed in Cgo")
 	}
+
+	duration := time.Since(start)
+	audioDuration := float64(totalSamples) / float64(activeEngine.sampleRate)
+
+	// Update metrics
+	activeEngine.totalAudioSeconds += audioDuration
+	m.metrics.mu.Lock()
+	m.metrics.TotalUtterances++
+	m.metrics.TotalWords += wordCount
+	m.metrics.TotalAudioSeconds += audioDuration
+	m.metrics.TotalInferenceDuration += duration
+	m.metrics.mu.Unlock()
 
 	return nil
 }
@@ -331,13 +392,14 @@ func (m *Manager) Close() {
 }
 
 type ModelInfo struct {
-	Name             string    `json:"name"`
-	SizeBytes        int64     `json:"size_bytes"`
-	LastUsed         time.Time `json:"last_used"`
-	ExpiresInSeconds float64   `json:"expires_in_seconds"`
+	Name              string    `json:"name"`
+	SizeBytes         int64     `json:"size_bytes"`
+	LastUsed          time.Time `json:"last_used"`
+	ExpiresInSeconds  float64   `json:"expires_in_seconds"`
+	TotalAudioSeconds float64   `json:"total_audio_seconds"`
 }
 
-func (m *Manager) GetDetailedStatus() (string, []ModelInfo, int64) {
+func (m *Manager) GetDetailedStatus() (string, []ModelInfo, int64, map[string]interface{}) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -350,18 +412,46 @@ func (m *Manager) GetDetailedStatus() (string, []ModelInfo, int64) {
 		expires := 0.0
 		if name != active {
 			expires = ModelTTL.Seconds() - now.Sub(engine.lastUsed).Seconds()
+			if expires < 0 {
+				expires = 0
+			}
 		}
 
 		cacheInfo = append(cacheInfo, ModelInfo{
-			Name:             name,
-			SizeBytes:        engine.size,
-			LastUsed:         engine.lastUsed,
-			ExpiresInSeconds: expires,
+			Name:              name,
+			SizeBytes:         engine.size,
+			LastUsed:          engine.lastUsed,
+			ExpiresInSeconds:  expires,
+			TotalAudioSeconds: engine.totalAudioSeconds,
 		})
 		totalSize += engine.size
 	}
 
-	return active, cacheInfo, totalSize
+	m.metrics.mu.Lock()
+	uptime := time.Since(m.metrics.StartTime)
+	rtf := 0.0
+	if m.metrics.TotalAudioSeconds > 0 {
+		rtf = m.metrics.TotalInferenceDuration.Seconds() / m.metrics.TotalAudioSeconds
+	}
+
+	h := int(m.metrics.TotalAudioSeconds / 3600)
+	min := int(m.metrics.TotalAudioSeconds/60) % 60
+	sec := int(m.metrics.TotalAudioSeconds) % 60
+	audioDurationFormatted := fmt.Sprintf("%dh %dm %ds", h, min, sec)
+
+	metrics := map[string]interface{}{
+		"uptime_seconds":           uptime.Seconds(),
+		"total_utterances":         m.metrics.TotalUtterances,
+		"total_words":              m.metrics.TotalWords,
+		"total_audio_seconds":      m.metrics.TotalAudioSeconds,
+		"total_audio_duration_hms": audioDurationFormatted,
+		"average_real_time_factor": rtf,
+		"total_bytes_received":     m.metrics.TotalRequestBytes,
+		"total_bytes_sent":         m.metrics.TotalResponseBytes,
+	}
+	m.metrics.mu.Unlock()
+
+	return active, cacheInfo, totalSize, metrics
 }
 
 // Keeping simple status for legacy/minimal if needed
