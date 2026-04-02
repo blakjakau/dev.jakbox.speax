@@ -183,7 +183,13 @@ func applyLengthVariance(base, variance float32, text string) float32 {
 	charCount := float32(len(text))
 	// Longer sentences (charCount > 60) -> Smaller ls (faster)
 	// Shorter sentences (charCount < 60) -> Larger ls (slower)
-	lengthBias := (60.0 - charCount) / 600.0 
+	// Divisor 1125 ensures -0.12 shift at 600 chars (60-600)/1125 = -0.48, * 0.25 variance = -0.12.
+	lengthBias := (60.0 - charCount) / 1125.0 
+	
+	// Cap the speed increase (negative bias) to 12% shift @ 0.25 variance
+	if lengthBias < -0.48 {
+		lengthBias = -0.48
+	}
 	
 	// Final delta calculation (standard randomization + length bias)
 	maxDelta := variance * 0.1
