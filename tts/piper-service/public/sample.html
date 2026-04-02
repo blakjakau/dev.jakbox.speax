@@ -145,16 +145,30 @@
             border-color: var(--primary);
         }
 
-        textarea {
-            resize: vertical;
-            min-height: 120px;
+        input[type=range] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            background: transparent;
+            margin: 0.5rem 0;
         }
 
-        .actions {
-            display: flex;
-            justify-content: flex-end;
-            gap: 1rem;
-            align-items: center;
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            background: var(--outline);
+            border-radius: 2px;
+        }
+
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: var(--primary);
+            margin-top: -6px;
+            cursor: pointer;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.5);
         }
 
         button.primary {
@@ -293,6 +307,25 @@
                 </div>
             </div>
 
+            <div class="form-grid" style="grid-template-columns: repeat(4, 1fr);">
+                <div class="field-group">
+                    <label for="lengthScale">Length Scale (<span id="lengthScaleVal">1.0</span>)</label>
+                    <input type="range" id="lengthScale" min="0.25" max="3.0" step="0.05" value="1.0">
+                </div>
+                <div class="field-group">
+                    <label for="noiseScale">Noise Scale (<span id="noiseScaleVal">0.667</span>)</label>
+                    <input type="range" id="noiseScale" min="0" max="2.0" step="0.01" value="0.667">
+                </div>
+                <div class="field-group">
+                    <label for="noiseW">Noise W (<span id="noiseWVal">0.8</span>)</label>
+                    <input type="range" id="noiseW" min="0" max="2.0" step="0.01" value="0.8">
+                </div>
+                <div class="field-group">
+                    <label for="variance">Variance (<span id="varianceVal">0.0</span>)</label>
+                    <input type="range" id="variance" min="0" max="1.0" step="0.01" value="0.0">
+                </div>
+            </div>
+
             <div class="field-group" style="margin-bottom: 1rem;">
                 <label>Text Input</label>
                 <textarea id="text-input" placeholder="Type something for Piper to say..."></textarea>
@@ -338,8 +371,8 @@
         const modeSelect = document.getElementById('mode-select');
         const annotatedBtn = document.getElementById('annotatedBtn');
         const synthBtn = document.getElementById('synthBtn');
+        const stopBtn = document.getElementById('stopBtn');
         const textInput = document.getElementById('text-input');
-        const logArea = document.getElementById('log-box');
         const canvas = document.getElementById('visualizer');
         const ctx_canvas = canvas.getContext('2d');
         const highlightArea = document.getElementById('highlightArea');
@@ -350,7 +383,16 @@
         const statusDot = document.getElementById('status-dot');
         const statusText = document.getElementById('status-text');
         const uptimeSpan = document.getElementById('uptime');
-        const stopBtn = document.getElementById('stopBtn');
+        
+        const lengthScaleInput = document.getElementById('lengthScale');
+        const noiseScaleInput = document.getElementById('noiseScale');
+        const noiseWInput = document.getElementById('noiseW');
+        const varianceInput = document.getElementById('variance');
+        
+        const lengthScaleVal = document.getElementById('lengthScaleVal');
+        const noiseScaleVal = document.getElementById('noiseScaleVal');
+        const noiseWVal = document.getElementById('noiseWVal');
+        const varianceVal = document.getElementById('varianceVal');
 
         const statMem = document.getElementById('stat-mem');
         const statCpu = document.getElementById('stat-cpu');
@@ -684,6 +726,10 @@
             localStorage.setItem('piper_last_text', text);
             localStorage.setItem('piper_last_mode', mode);
             localStorage.setItem('piper_last_annotated', annotatedBtn.checked);
+            localStorage.setItem('piper_last_length_scale', lengthScaleInput.value);
+            localStorage.setItem('piper_last_noise_scale', noiseScaleInput.value);
+            localStorage.setItem('piper_last_noise_w', noiseWInput.value);
+            localStorage.setItem('piper_last_variance', varianceInput.value);
 
             const ctx = initAudio();
             if (ctx.state === 'suspended') {
@@ -694,7 +740,13 @@
                 try {
                     const res = await fetch('/tts', {
                         method: 'POST',
-                        body: JSON.stringify({ text })
+                        body: JSON.stringify({ 
+                            text,
+                            length_scale: parseFloat(lengthScaleInput.value),
+                            noise_scale: parseFloat(noiseScaleInput.value),
+                            noise_w: parseFloat(noiseWInput.value),
+                            variance: parseFloat(varianceInput.value)
+                        })
                     });
                     const blob = await res.blob();
                     const url = URL.createObjectURL(blob);
@@ -716,7 +768,11 @@
                 if (socket && socket.readyState === WebSocket.OPEN) {
                     socket.send(JSON.stringify({ 
                         text, 
-                        annotated: annotatedBtn.checked 
+                        annotated: annotatedBtn.checked,
+                        length_scale: parseFloat(lengthScaleInput.value),
+                        noise_scale: parseFloat(noiseScaleInput.value),
+                        noise_w: parseFloat(noiseWInput.value),
+                        variance: parseFloat(varianceInput.value)
                     }));
                 } else {
                     log("WebSocket not connected", true);
@@ -734,6 +790,26 @@
 
         const lastAnnotated = localStorage.getItem('piper_last_annotated');
         if (lastAnnotated !== null) annotatedBtn.checked = lastAnnotated === 'true';
+
+        // Load voice parameters
+        const lastLS = localStorage.getItem('piper_last_length_scale');
+        if (lastLS) { lengthScaleInput.value = lastLS; lengthScaleVal.textContent = lastLS; }
+        
+        const lastNS = localStorage.getItem('piper_last_noise_scale');
+        if (lastNS) { noiseScaleInput.value = lastNS; noiseScaleVal.textContent = lastNS; }
+        
+        const lastNW = localStorage.getItem('piper_last_noise_w');
+        if (lastNW) { noiseWInput.value = lastNW; noiseWVal.textContent = lastNW; }
+        
+        const lastVar = localStorage.getItem('piper_last_variance');
+        if (lastVar) { varianceInput.value = lastVar; varianceVal.textContent = lastVar; }
+
+        // Add slider listeners
+        [lengthScaleInput, noiseScaleInput, noiseWInput, varianceInput].forEach(el => {
+            el.oninput = () => {
+                document.getElementById(el.id + 'Val').textContent = el.value;
+            };
+        });
 
         connectWS();
         fetchModels();

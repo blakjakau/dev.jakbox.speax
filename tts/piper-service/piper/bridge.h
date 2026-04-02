@@ -17,10 +17,10 @@ typedef void (*PiperAudioCallback)(int16_t* data, int length, void* userdata);
 
 // Synthesize text to PCM. Returns number of samples, or -1 on error. 
 // Uses malloc to allocate out_buffer, caller must free using piper_free_buffer.
-int piper_synthesize(PiperContext ctx, const char* text, int16_t** out_buffer);
+int piper_synthesize(PiperContext ctx, const char* text, int16_t** out_buffer, float length_scale, float noise_scale, float noise_w);
 
 // Stream synthesis: calls callback for each audio chunk generated.
-int piper_synthesize_stream(PiperContext ctx, const char* text, PiperAudioCallback callback, void* userdata);
+int piper_synthesize_stream(PiperContext ctx, const char* text, PiperAudioCallback callback, void* userdata, float length_scale, float noise_scale, float noise_w);
 
 void piper_free_buffer(int16_t* buffer);
 void piper_free_context(PiperContext ctx);

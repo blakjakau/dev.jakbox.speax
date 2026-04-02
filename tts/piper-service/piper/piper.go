@@ -8,8 +8,8 @@ package piper
 
 extern void goAudioCallback(int16_t* data, int length, void* userdata);
 
-static inline int call_stream_synth(PiperContext ctx, const char* text, void* userdata) {
-    return piper_synthesize_stream(ctx, text, goAudioCallback, (void*)userdata);
+static inline int call_stream_synth(PiperContext ctx, const char* text, void* userdata, float length_scale, float noise_scale, float noise_w) {
+    return piper_synthesize_stream(ctx, text, goAudioCallback, (void*)userdata, length_scale, noise_scale, noise_w);
 }
 */
 import "C"
@@ -243,7 +243,7 @@ func (m *Manager) GetSampleRate() int {
 
 
 // Synthesize text using the currently active model
-func (m *Manager) Synthesize(text string) ([]int16, error) {
+func (m *Manager) Synthesize(text string, lengthScale, noiseScale, noiseW float32) ([]int16, error) {
 	m.mu.RLock()
 	activeEngine := m.cache[m.activeName]
 	m.mu.RUnlock()
@@ -268,7 +268,7 @@ func (m *Manager) Synthesize(text string) ([]int16, error) {
 	defer C.free(unsafe.Pointer(cText))
 
 	var cBuffer *C.int16_t
-	length := C.piper_synthesize(activeEngine.context, cText, &cBuffer)
+	length := C.piper_synthesize(activeEngine.context, cText, &cBuffer, C.float(lengthScale), C.float(noiseScale), C.float(noiseW))
 	
 	if length < 0 {
 		return nil, errors.New("synthesis failed in Cgo")
@@ -288,7 +288,7 @@ func (m *Manager) Synthesize(text string) ([]int16, error) {
 }
 
 // SynthesizeStream synthesizes text and calls back with audio chunks as they are produced.
-func (m *Manager) SynthesizeStream(text string, cb func([]int16)) error {
+func (m *Manager) SynthesizeStream(text string, lengthScale, noiseScale, noiseW float32, cb func([]int16)) error {
 	m.mu.RLock()
 	activeEngine := m.cache[m.activeName]
 	m.mu.RUnlock()
@@ -311,7 +311,7 @@ func (m *Manager) SynthesizeStream(text string, cb func([]int16)) error {
 	cbID := registerCallback(cb)
 	defer unregisterCallback(cbID)
 
-	res := C.call_stream_synth(activeEngine.context, cText, unsafe.Pointer(cbID))
+	res := C.call_stream_synth(activeEngine.context, cText, unsafe.Pointer(cbID), C.float(lengthScale), C.float(noiseScale), C.float(noiseW))
 	if res != 0 {
 		return errors.New("streaming synthesis failed in Cgo")
 	}

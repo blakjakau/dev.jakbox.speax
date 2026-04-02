@@ -240,6 +240,7 @@ class AudioEngine(
         // If the sample rate changed, or the track doesn't exist, (re)build it
         if (audioTrack == null || audioTrack?.sampleRate != trackSampleRate) {
             audioTrack?.release()
+            totalAiFrames = 0 // Reset total frames since the head position will restart at 0
             totalWrittenFrames = 0
             rmsQueue.clear()
             
@@ -337,5 +338,11 @@ class AudioEngine(
         progressThread?.interrupt()
         progressThread = null
         // We don't release here so we can reuse the track for gapless streaming
+    }
+
+    fun prepareForNewStream() {
+        Log.d("AudioEngine", "Preparing for new audio stream (clearing RMS queue only)")
+        // We no longer reset totalAiFrames/totalWrittenFrames here to allow accumulation
+        // rmsQueue.clear() // Should we clear RMS queue? Yes, because we want it to stay synced with the track head if we're technically between chunks.
     }
 }

@@ -8,11 +8,18 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 type TTSRequest struct {
-	Text      string `json:"text"`
-	Annotated bool   `json:"annotated"`
+	Text        string  `json:"text"`
+	Annotated   bool    `json:"annotated"`
+	Model       string  `json:"model"`
+	Cmd         string  `json:"cmd"`
+	LengthScale float32 `json:"length_scale"`
+	NoiseScale  float32 `json:"noise_scale"`
+	NoiseW      float32 `json:"noise_w"`
+	Variance    float32 `json:"variance"`
 }
 
 type ModelRequest struct {
@@ -36,7 +43,9 @@ func (api *API) handleTTS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	audioData, err := api.Manager.Synthesize(req.Text)
+	// Apply defaults and variance
+	ls, ns, nw := api.getSynthesisParams(req)
+	audioData, err := api.Manager.Synthesize(req.Text, ls, ns, nw)
 	if err != nil {
 		sendError(w, fmt.Sprintf("Synthesis failed: %v", err), http.StatusInternalServerError)
 		return
@@ -137,4 +146,62 @@ func (api *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"cached_models":               cache,
 		"total_cache_size_estimate":   totalSize,
 	})
+}
+
+func (api *API) getSynthesisParams(req TTSRequest) (ls, ns, nw float32) {
+	ls = req.LengthScale
+	if ls <= 0 {
+		ls = 1.0
+	}
+	ns = req.NoiseScale
+	if ns <= 0 {
+		ns = 0.667
+	}
+	nw = req.NoiseW
+	if nw <= 0 {
+		nw = 0.8
+	}
+
+	if req.Variance > 0 {
+		ls = applyLengthVariance(ls, req.Variance, req.Text)
+		ns = applyParameterVariance(ns, req.Variance)
+		nw = applyParameterVariance(nw, req.Variance)
+	}
+	return
+}
+
+func applyLengthVariance(base, variance float32, text string) float32 {
+	if variance <= 0 {
+		return base
+	}
+	
+	// Weighted bias based on length
+	// meanLength is roughly 60 chars.
+	charCount := float32(len(text))
+	// Longer sentences (charCount > 60) -> Smaller ls (faster)
+	// Shorter sentences (charCount < 60) -> Larger ls (slower)
+	lengthBias := (60.0 - charCount) / 600.0 
+	
+	// Final delta calculation (standard randomization + length bias)
+	maxDelta := variance * 0.1
+	randomDelta := (float32(time.Now().UnixNano()%1000) / 500.0 * maxDelta) - maxDelta
+	
+	res := base + (lengthBias * variance) + randomDelta
+	if res < 0.01 {
+		res = 0.01
+	}
+	return res
+}
+
+func applyParameterVariance(base, variance float32) float32 {
+	if variance <= 0 {
+		return base
+	}
+	maxDelta := variance * 0.1
+	delta := (float32(time.Now().UnixNano()%1000) / 500.0 * maxDelta) - maxDelta
+	res := base + delta
+	if res < 0.01 {
+		res = 0.01
+	}
+	return res
 }

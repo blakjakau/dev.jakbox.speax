@@ -39,10 +39,15 @@ int piper_load_voice(PiperContext ctx, const char* model_path, const char* confi
 }
 
 // Synthesize text to PCM
-int piper_synthesize(PiperContext ctx, const char* text, int16_t** out_buffer) {
+int piper_synthesize(PiperContext ctx, const char* text, int16_t** out_buffer, float length_scale, float noise_scale, float noise_w) {
     if (!ctx || !text || !out_buffer) return -1;
     RealContext* c = reinterpret_cast<RealContext*>(ctx);
     if (!c->voice_loaded) return -1;
+
+    // Apply custom parameters
+    c->voice.synthesisConfig.lengthScale = length_scale;
+    c->voice.synthesisConfig.noiseScale = noise_scale;
+    c->voice.synthesisConfig.noiseW = noise_w;
 
     std::vector<int16_t> audioBuffer;
     piper::SynthesisResult result;
@@ -73,10 +78,15 @@ int piper_synthesize(PiperContext ctx, const char* text, int16_t** out_buffer) {
     return size;
 }
 
-int piper_synthesize_stream(PiperContext ctx, const char* text, PiperAudioCallback callback, void* userdata) {
+int piper_synthesize_stream(PiperContext ctx, const char* text, PiperAudioCallback callback, void* userdata, float length_scale, float noise_scale, float noise_w) {
     if (!ctx || !text || !callback) return -1;
     RealContext* c = reinterpret_cast<RealContext*>(ctx);
     if (!c->voice_loaded) return -1;
+
+    // Apply custom parameters
+    c->voice.synthesisConfig.lengthScale = length_scale;
+    c->voice.synthesisConfig.noiseScale = noise_scale;
+    c->voice.synthesisConfig.noiseW = noise_w;
 
     std::vector<int16_t> audioBuffer;
     piper::SynthesisResult result;

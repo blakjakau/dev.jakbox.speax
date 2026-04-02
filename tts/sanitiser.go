@@ -14,8 +14,9 @@ func Sanitise(text string, userName string, personaName string, phoneticName str
 	// 2. Vocative Comma Enhancement: Replace comma before the last word of a sentence with an ellipsis
 	// Pattern: "," [optional space] [word] [terminal punctuation]
 	// This helps Piper introduce a natural pause (e.g., "Hello, Jason!" -> "Hello... Jason!")
-	vocativeRe := regexp.MustCompile(`,\s*(\w+)([.!?;:])`)
-	text = vocativeRe.ReplaceAllString(text, "... $1$2")
+	
+	// vocativeRe := regexp.MustCompile(`,\s*(\w+)([.!?;:])`)
+	// text = vocativeRe.ReplaceAllString(text, "... $1$2")
 
 	// 3. User Name specific cleanup (case-insensitive)
 	if userName != "" {

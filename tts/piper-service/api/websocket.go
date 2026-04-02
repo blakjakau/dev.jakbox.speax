@@ -15,6 +15,7 @@ import (
 type sessionState struct {
 	firstChunkSent bool
 	isAnnotated    bool
+	ls, ns, nw, varp float32
 }
 
 func (api *API) handleStream(w http.ResponseWriter, r *http.Request) {
@@ -38,6 +39,7 @@ func (api *API) handleStream(w http.ResponseWriter, r *http.Request) {
 	textInput := make(chan struct {
 		text      string
 		annotated bool
+		ls, ns, nw, varp float32
 	}, 100)
 	done := make(chan struct{})
 
@@ -54,13 +56,15 @@ func (api *API) handleStream(w http.ResponseWriter, r *http.Request) {
 				if !ok {
 					// Final flush before closing
 					log.Printf("[WS] Channel closed, performing final flush of %d chars", len(textBuffer))
-					api.flushRemaining(conn, &textBuffer, state)
+					api.flushRemaining(conn, &textBuffer, state, state.ls, state.ns, state.nw, state.varp)
 					return
 				}
 
 				if req.annotated {
 					state.isAnnotated = true
 				}
+				// Update current synthesis state from request
+				state.ls, state.ns, state.nw, state.varp = req.ls, req.ns, req.nw, req.varp
 
 				log.Printf("[WS] Received text chunk: '%s'", req.text)
 
@@ -88,7 +92,7 @@ func (api *API) handleStream(w http.ResponseWriter, r *http.Request) {
 					textBuffer = textBuffer[splitIdx+1:]
 
 					log.Printf("[WS] Gated segment identified: '%s' (Stage 1: %v)", segment, !state.firstChunkSent)
-					api.synthesizeAndSend(conn, segment, state)
+					api.synthesizeAndSend(conn, segment, state, state.ls, state.ns, state.nw, state.varp)
 				}
 
 				// Always start/restart the inactivity timer unconditionally
@@ -98,7 +102,7 @@ func (api *API) handleStream(w http.ResponseWriter, r *http.Request) {
 			case <-flushTimer.C:
 				if len(textBuffer) > 0 {
 					log.Printf("[WS] Inactivity flush trigger: '%s'", textBuffer)
-					api.flushRemaining(conn, &textBuffer, state)
+					api.flushRemaining(conn, &textBuffer, state, state.ls, state.ns, state.nw, state.varp)
 				} else if state.firstChunkSent {
 					log.Printf("[WS] Inactivity end trigger: stream completed")
 					api.finalizeStream(conn, state)
@@ -125,18 +129,52 @@ func (api *API) handleStream(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// Handle explicit model switching if provided
+		if req.Model != "" {
+			log.Printf("[WS] Switching model to: %s", req.Model)
+			if err := api.Manager.LoadModel(req.Model); err != nil {
+				log.Printf("[WS] Failed to switch model: %v", err)
+				// Don't abort, just log and continue as it might just be the current model already
+			}
+		}
+
+		// Handle diagnostic commands
+		if req.Cmd != "" {
+			switch req.Cmd {
+			case "health":
+				log.Printf("[WS] Command received: health")
+				health := api.GetHealthMetrics()
+				if p, err := json.Marshal(health); err == nil {
+					conn.WriteMessage(websocket.TextMessage, p)
+				}
+			case "status":
+				log.Printf("[WS] Command received: status")
+				active, cache, totalSize := api.Manager.GetDetailedStatus()
+				status := map[string]interface{}{
+					"active_model":              active,
+					"cached_models":             cache,
+					"total_cache_size_estimate": totalSize,
+				}
+				if p, err := json.Marshal(status); err == nil {
+					conn.WriteMessage(websocket.TextMessage, p)
+				}
+			}
+		}
+
 		if req.Text != "" {
+			ls, ns, nw := api.getSynthesisParams(req)
 			textInput <- struct {
-				text      string
-				annotated bool
-			}{req.Text, req.Annotated}
+				text             string
+				annotated        bool
+				ls, ns, nw, varp float32
+			}{req.Text, req.Annotated, ls, ns, nw, req.Variance}
 		}
 	}
 	<-done
 }
 
 // synthesizeAndSend performs core synthesis and writes binary data to WS immediately.
-func (api *API) synthesizeAndSend(conn *websocket.Conn, text string, state *sessionState) {
+func (api *API) synthesizeAndSend(conn *websocket.Conn, text string, state *sessionState, baseLS, baseNS, baseNW, variance float32) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
@@ -153,8 +191,13 @@ func (api *API) synthesizeAndSend(conn *websocket.Conn, text string, state *sess
 			conn.WriteMessage(websocket.TextMessage, p)
 		}
 	}
+	
+	// Apply per-sentence variance (Length-weighted for LS)
+	ls := applyLengthVariance(baseLS, variance, text)
+	ns := applyParameterVariance(baseNS, variance)
+	nw := applyParameterVariance(baseNW, variance)
 
-	err := api.Manager.SynthesizeStream(text, func(audioData []int16) {
+	err := api.Manager.SynthesizeStream(text, ls, ns, nw, func(audioData []int16) {
 		if len(audioData) == 0 {
 			return
 		}
@@ -195,7 +238,7 @@ func (api *API) synthesizeAndSend(conn *websocket.Conn, text string, state *sess
 }
 
 // flushRemaining consumes the rest of the buffer after a timeout or connection end.
-func (api *API) flushRemaining(conn *websocket.Conn, buffer *string, state *sessionState) {
+func (api *API) flushRemaining(conn *websocket.Conn, buffer *string, state *sessionState, ls, ns, nw, variance float32) {
 	text := *buffer
 	if text == "" {
 		return
@@ -214,14 +257,14 @@ Loop:
 		splitIdx := findSentenceBoundary(text, 0, 350)
 		if splitIdx == -1 {
 			// No more boundaries, synthesize the rest as one last chunk
-			api.synthesizeAndSend(conn, text, state)
+			api.synthesizeAndSend(conn, text, state, ls, ns, nw, variance)
 			break Loop
 		}
 
 		segment := text[:splitIdx+1]
 		text = text[splitIdx+1:]
 
-		api.synthesizeAndSend(conn, segment, state)
+		api.synthesizeAndSend(conn, segment, state, ls, ns, nw, variance)
 	}
 
 	*buffer = ""

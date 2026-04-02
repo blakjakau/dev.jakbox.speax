@@ -15,24 +15,27 @@ func (api *API) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	metrics := api.GetHealthMetrics()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metrics)
+}
+
+func (api *API) GetHealthMetrics() map[string]interface{} {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 
 	current, previous := api.Manager.Status()
 
-	metrics := map[string]interface{}{
-		"status": "ok",
-		"uptime_seconds": time.Since(startTime).Seconds(),
+	return map[string]interface{}{
+		"status":             "ok",
+		"uptime_seconds":     time.Since(startTime).Seconds(),
 		"memory_usage_bytes": memStats.Alloc, // Use bytes to match formatBytes in frontend
-		"memory_sys_bytes": memStats.Sys,
-		"goroutines": runtime.NumGoroutine(),
-		"cpu_usage_percent": 0.0, // Placeholder
+		"memory_sys_bytes":   memStats.Sys,
+		"goroutines":         runtime.NumGoroutine(),
+		"cpu_usage_percent":  0.0, // Placeholder
 		"models": map[string]string{
-			"current": current,
+			"current":  current,
 			"previous": previous,
 		},
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(metrics)
 }

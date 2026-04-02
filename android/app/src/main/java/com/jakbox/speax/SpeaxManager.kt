@@ -59,6 +59,7 @@ object SpeaxManager {
     var statusText by mutableStateOf("Disconnected")
     var currentRms by mutableStateOf(0f)
     var aiRms by mutableStateOf(0f)
+    var currentTtsSampleRate = 22050
     var playbackProgress by mutableStateOf(0f)
     var isMicMuted by mutableStateOf(false)
     var isAiPaused by mutableStateOf(false)
@@ -347,7 +348,7 @@ object SpeaxManager {
 
         val serverUrl = "wss://speax.jakbox.dev/ws"
         val deviceName = java.net.URLEncoder.encode("${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}", "UTF-8")
-        val fullUrl = "$serverUrl?client=android&device=$deviceName"
+        val fullUrl = "$serverUrl?client=android&device=$deviceName&version=1"
         
         statusText = "Connecting..."
         speaxWebSocket?.disconnect()
@@ -359,7 +360,7 @@ object SpeaxManager {
                 if (ws === speaxWebSocket) handleIncomingText(text)
             },
             onAudioReceived = { ws, audioBytes ->
-                if (ws === speaxWebSocket) audioEngine.playAudioChunk(audioBytes)
+                if (ws === speaxWebSocket) audioEngine.playAudioChunk(audioBytes, currentTtsSampleRate)
             },
             onConnected = { ws ->
                 if (ws === speaxWebSocket) {
@@ -570,16 +571,31 @@ object SpeaxManager {
                     }
                 }
                 text.startsWith("[TTS_CHUNK]") -> {
-                    val chunk = sanitiseTTSText(text.removePrefix("[TTS_CHUNK]"))
-                    if (useLocalTts && chunk.isNotBlank()) {
-                        CoroutineScope(Dispatchers.IO).launch {
-                            piperMutex.withLock {
-                                // Resolve voice ID to voice file if possible
-                                val persona = availableVoices.find { it.id == aiVoice }
-                                val voiceToUse = persona?.voiceFile ?: aiVoice
-                                val audioBytes = piperEngine.synthesize(chunk, voiceToUse)
-                                if (audioBytes != null && audioBytes.isNotEmpty()) {
-                                    audioEngine.playAudioChunk(audioBytes)
+                    val content = text.removePrefix("[TTS_CHUNK]")
+                    if (content.startsWith("{")) {
+                        try {
+                            val json = JSONObject(content)
+                            when (json.optString("type")) {
+                                "start" -> {
+                                    currentTtsSampleRate = json.optInt("sampleRate", 22050)
+                                    audioEngine.prepareForNewStream()
+                                    Log.d("SpeaxManager", "Remote TTS Start: sampleRate=$currentTtsSampleRate")
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.e("SpeaxManager", "Failed to parse TTS_CHUNK JSON: $content", e)
+                        }
+                    } else {
+                        val chunk = sanitiseTTSText(content)
+                        if (useLocalTts && chunk.isNotBlank()) {
+                            CoroutineScope(Dispatchers.IO).launch {
+                                piperMutex.withLock {
+                                    val persona = availableVoices.find { it.id == aiVoice }
+                                    val voiceToUse = persona?.voiceFile ?: aiVoice
+                                    val audioBytes = piperEngine.synthesize(chunk, voiceToUse)
+                                    if (audioBytes != null && audioBytes.isNotEmpty()) {
+                                        audioEngine.playAudioChunk(audioBytes)
+                                    }
                                 }
                             }
                         }

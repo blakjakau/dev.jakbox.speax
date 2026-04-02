@@ -47,6 +47,7 @@ type FallbackLLMConfig struct {
 
 type Config struct {
 	WhisperURLs          []string                  `json:"WhisperURLs"`
+	PiperURLs            []string                  `json:"PiperURLs"`
 	PiperBin             string                    `json:"PiperBin"`
 	DefaultVoice         string                    `json:"DefaultVoice"`
 	SampleRate           int                       `json:"SampleRate"`
@@ -98,6 +99,7 @@ var (
 
 var (
 	whisperIndex    uint32
+	piperIndex      uint32
 	ollamaIndex     uint32
 	ollamaChatIndex uint32
 )
@@ -345,6 +347,41 @@ func getNextURL(urls []string, index *uint32) string {
 	return urls[int(newIdx-1)%len(urls)]
 }
 
+type PiperNode struct {
+	URL           string
+	Zombie        bool
+	FailureCount  int
+	TotalRequests int
+	TotalFailures int
+}
+
+var (
+	piperNodes      []*PiperNode
+	piperNodesMutex sync.RWMutex
+)
+
+var ErrNoPiperNodes = fmt.Errorf("no Piper service nodes available")
+
+func getHealthyPiperNode() (*PiperNode, error) {
+	piperNodesMutex.RLock()
+	defer piperNodesMutex.RUnlock()
+
+	numNodes := len(piperNodes)
+	if numNodes == 0 {
+		return nil, ErrNoPiperNodes
+	}
+
+	for i := 0; i < numNodes; i++ {
+		idx := atomic.AddUint32(&piperIndex, 1) - 1
+		node := piperNodes[idx%uint32(numNodes)]
+		if !node.Zombie {
+			return node, nil
+		}
+	}
+
+	return nil, ErrNoPiperNodes
+}
+
 func getHealthyWhisperNode() (*WhisperNode, error) {
 	whisperNodesMutex.RLock()
 	defer whisperNodesMutex.RUnlock()
@@ -398,6 +435,24 @@ func reloadConfig(path string) error {
 	}
 	whisperNodes = newNodes
 	whisperNodesMutex.Unlock()
+
+	// Initialize Piper nodes
+	piperNodesMutex.Lock()
+	existingPiperNodes := make(map[string]*PiperNode)
+	for _, node := range piperNodes {
+		existingPiperNodes[node.URL] = node
+	}
+	var newPiperNodes []*PiperNode
+	for _, url := range newConfig.PiperURLs {
+		if node, exists := existingPiperNodes[url]; exists {
+			newPiperNodes = append(newPiperNodes, node)
+		} else {
+			newPiperNodes = append(newPiperNodes, &PiperNode{URL: url, Zombie: false})
+		}
+	}
+	piperNodes = newPiperNodes
+	piperNodesMutex.Unlock()
+
 	return nil
 }
 
@@ -501,6 +556,7 @@ type Persona struct {
 	VoiceNoiseScale      float64      `json:"voice_noise_scale,omitempty"`
 	VoiceLengthScale     float64      `json:"voice_length_scale,omitempty"`
 	VoiceNoiseW          float64      `json:"voice_noise_w,omitempty"`
+	VoiceVariance        float64      `json:"voice_variance,omitempty"`
 	Theme                 PersonaTheme `json:"theme"`
 }
 
@@ -672,6 +728,7 @@ type ClientSession struct {
 	FallbackOriginalProvider string                 `json:"fallbackOriginalProvider"`
 	FallbackOriginalModel    string                 `json:"fallbackOriginalModel"`
 	PassiveBlockUntil        time.Time              `json:"-"`
+	Version                  int                    `json:"version"`
 }
 
 func IsAdminID(id string) bool {
@@ -2028,7 +2085,11 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	fmt.Printf("Client connected: %s (%s on %s)\n", clientID, clientType, deviceName)
 
+	versionStr := r.URL.Query().Get("version")
+	version, _ := strconv.Atoi(versionStr)
+
 	session := getOrCreateSession(clientID)
+	session.Version = version
 
 	if clientType != "tool" {
 		cacheModelsAsync(session.APIKey)
@@ -4001,6 +4062,27 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		var rp *tts.RemotePiper
+		var rpErr error
+
+		session.Mutex.Lock()
+		clientVersion := session.Version
+		session.Mutex.Unlock()
+
+		if clientVersion >= 1 {
+			if node, err := getHealthyPiperNode(); err == nil {
+				log.Printf("[Gemini TTS Worker] version %d detected. Connecting to remote piper-service at %s", clientVersion, node.URL)
+				rp, rpErr = tts.NewRemotePiper(node.URL)
+				if rpErr != nil {
+					log.Printf("[Gemini TTS Worker] failed to connect to remote piper: %v", rpErr)
+				} else {
+					defer rp.Close()
+				}
+			} else {
+				log.Printf("[Gemini TTS Worker] version %d detected but no healthy piper nodes found. Falling back to local.", clientVersion)
+			}
+		}
+
 		for text := range ttsChan {
 			if ctx.Err() != nil {
 				return
@@ -4008,25 +4090,53 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			session.Mutex.Lock()
 			isClientTts := session.ClientTts
 			session.Mutex.Unlock()
+
+			target := ws
+			if target == nil || session.isToolConn(target) {
+				target = getLastActiveUIConn(session)
+			}
+
 			if isClientTts {
-				target := ws
-				if target == nil || session.isToolConn(target) {
-					target = getLastActiveUIConn(session)
-				}
 				if target != nil {
 					safeWrite(target, session, websocket.TextMessage, []byte("[TTS_CHUNK]"+text))
 				}
+			} else if clientVersion >= 1 && rp != nil {
+				// Resolve the onnx filename and synthesis parameters from personas
+				voiceFile := voice // Default to the id
+				ls, ns, nw, vv := 1.0, 0.667, 0.8, 0.25
+				personasMutex.RLock()
+				if p, ok := personas[strings.ToLower(targetPersonaName)]; ok {
+					if p.VoiceFile != "" {
+						voiceFile = p.VoiceFile
+					}
+					if p.VoiceLengthScale > 0 { ls = p.VoiceLengthScale }
+					if p.VoiceNoiseScale > 0 { ns = p.VoiceNoiseScale }
+					if p.VoiceNoiseW > 0 { nw = p.VoiceNoiseW }
+					if p.VoiceVariance > 0 { vv = p.VoiceVariance }
+				}
+				personasMutex.RUnlock()
+
+				log.Printf("[Gemini TTS Worker] Streaming to remote piper: '%s' (voice: %s, ls: %.2f, ns: %.2f, nw: %.2f, var: %.2f)", 
+					text, voiceFile, ls, ns, nw, vv)
+				err := rp.Stream(ctx, voiceFile, text, true, ls, ns, nw, vv, func(jsonMeta string) {
+					if target != nil {
+						safeWrite(target, session, websocket.TextMessage, []byte("[TTS_CHUNK]"+jsonMeta))
+					}
+				}, func(pcm []byte) {
+					if target != nil {
+						safeWrite(target, session, websocket.BinaryMessage, pcm)
+					}
+				})
+				if err != nil {
+					log.Printf("[Gemini TTS Worker] Remote piper stream error: %v", err)
+				}
 			} else {
-				log.Printf("[Gemini TTS Worker] Processing chunk (len: %d) with voice: '%s', user: '%s', persona: '%s', phonetic: '%s'", 
-					len(text), voice, effectiveUserName, targetPersonaName, phoneticPersonaName)
+				log.Printf("[Gemini TTS Worker] Processing chunk (len: %d) with local piper binary: '%s'", 
+					len(text), text)
 				audioBytes, err := queryTTS(text, voice, effectiveUserName, targetPersonaName, phoneticPersonaName)
 				if err != nil {
 					log.Println("Gemini TTS Worker Error:", err)
 				} else if ctx.Err() == nil {
-					target := ws
-					if target == nil || session.isToolConn(target) {
-						target = getLastActiveUIConn(session)
-					}
 					if target != nil {
 						safeWrite(target, session, websocket.BinaryMessage, audioBytes)
 					}
@@ -4354,6 +4464,27 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		var rp *tts.RemotePiper
+		var rpErr error
+
+		session.Mutex.Lock()
+		clientVersion := session.Version
+		session.Mutex.Unlock()
+
+		if clientVersion >= 1 {
+			if node, err := getHealthyPiperNode(); err == nil {
+				log.Printf("[Ollama TTS Worker] version %d detected. Connecting to remote piper-service at %s", clientVersion, node.URL)
+				rp, rpErr = tts.NewRemotePiper(node.URL)
+				if rpErr != nil {
+					log.Printf("[Ollama TTS Worker] failed to connect to remote piper: %v", rpErr)
+				} else {
+					defer rp.Close()
+				}
+			} else {
+				log.Printf("[Ollama TTS Worker] version %d detected but no healthy piper nodes found. Falling back to local.", clientVersion)
+			}
+		}
+
 		for text := range ttsChan {
 			if ctx.Err() != nil {
 				return
@@ -4361,25 +4492,53 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			session.Mutex.Lock()
 			isClientTts := session.ClientTts
 			session.Mutex.Unlock()
+
+			target := ws
+			if target == nil || session.isToolConn(target) {
+				target = getLastActiveUIConn(session)
+			}
+
 			if isClientTts {
-				target := ws
-				if target == nil || session.isToolConn(target) {
-					target = getLastActiveUIConn(session)
-				}
 				if target != nil {
 					safeWrite(target, session, websocket.TextMessage, []byte("[TTS_CHUNK]"+text))
 				}
+			} else if clientVersion >= 1 && rp != nil {
+				// Resolve the onnx filename and synthesis parameters from personas
+				voiceFile := voice // Default to the id
+				ls, ns, nw, vv := 1.0, 0.667, 0.8, 0.25
+				personasMutex.RLock()
+				if p, ok := personas[strings.ToLower(targetPersonaName)]; ok {
+					if p.VoiceFile != "" {
+						voiceFile = p.VoiceFile
+					}
+					if p.VoiceLengthScale > 0 { ls = p.VoiceLengthScale }
+					if p.VoiceNoiseScale > 0 { ns = p.VoiceNoiseScale }
+					if p.VoiceNoiseW > 0 { nw = p.VoiceNoiseW }
+					if p.VoiceVariance > 0 { vv = p.VoiceVariance }
+				}
+				personasMutex.RUnlock()
+
+				log.Printf("[Ollama TTS Worker] Streaming to remote piper: '%s' (voice: %s, ls: %.2f, ns: %.2f, nw: %.2f, var: %.2f)", 
+					text, voiceFile, ls, ns, nw, vv)
+				err := rp.Stream(ctx, voiceFile, text, true, ls, ns, nw, vv, func(jsonMeta string) {
+					if target != nil {
+						safeWrite(target, session, websocket.TextMessage, []byte("[TTS_CHUNK]"+jsonMeta))
+					}
+				}, func(pcm []byte) {
+					if target != nil {
+						safeWrite(target, session, websocket.BinaryMessage, pcm)
+					}
+				})
+				if err != nil {
+					log.Printf("[Ollama TTS Worker] Remote piper stream error: %v", err)
+				}
 			} else {
-				log.Printf("[Ollama TTS Worker] Processing chunk (len: %d) with voice: '%s', user: '%s', persona: '%s', phonetic: '%s'", 
-					len(text), voice, effectiveUserName, targetPersonaName, phoneticPersonaName)
+				log.Printf("[Ollama TTS Worker] Processing chunk (len: %d) with local piper binary: '%s'", 
+					len(text), text)
 				audioBytes, err := queryTTS(text, voice, effectiveUserName, targetPersonaName, phoneticPersonaName)
 				if err != nil {
 					log.Println("Ollama TTS Worker Error:", err)
 				} else if ctx.Err() == nil {
-					target := ws
-					if target == nil || session.isToolConn(target) {
-						target = getLastActiveUIConn(session)
-					}
 					if target != nil {
 						safeWrite(target, session, websocket.BinaryMessage, audioBytes)
 					}
@@ -4892,27 +5051,11 @@ func queryTTS(text string, voice string, userName string, personaName string, ph
 	// lengthScale = randomVar(lengthScale)
 	noiseW = randomVar(noiseW)
 
-	cmd := exec.Command(piperBin,
-		"--model", modelPath,
-		"--noise_scale", fmt.Sprintf("%f", noiseScale),
-		"--length_scale", fmt.Sprintf("%f", lengthScale),
-		"--noise_w", fmt.Sprintf("%f", noiseW),
-		"-f", "-")
-
-	// Feed our text into Piper's standard input
-	cmd.Stdin = strings.NewReader(text)
-
-	// Capture the raw WAV audio from Piper's standard output
-	var out bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("piper execution failed: %v, stderr: %s", err, stderr.String())
+	audioBytes, err := tts.SynthesizeLocal(piperBin, modelPath, text, noiseScale, lengthScale, noiseW)
+	if err != nil {
+		return nil, err
 	}
 
-	audioBytes := out.Bytes()
 	log.Printf("[TTS] Successfully generated %d bytes of audio", len(audioBytes))
 	return audioBytes, nil
 }
@@ -5141,8 +5284,20 @@ func handlePerformanceMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	perfMetricsMu.Lock()
-	data, err := json.MarshalIndent(perfMetrics, "", "  ")
+	whisperNodesMutex.RLock()
+	piperNodesMutex.RLock()
+	
+	resp := map[string]interface{}{
+		"llm":          perfMetrics,
+		"whisperNodes": whisperNodes,
+		"piperNodes":   piperNodes,
+	}
+	data, err := json.MarshalIndent(resp, "", "  ")
+	
+	piperNodesMutex.RUnlock()
+	whisperNodesMutex.RUnlock()
 	perfMetricsMu.Unlock()
+	
 	if err != nil {
 		http.Error(w, `{"error":"serialisation error"}`, http.StatusInternalServerError)
 		return
