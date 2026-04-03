@@ -125,6 +125,7 @@ class MainActivity : ComponentActivity() {
     var isGeneratingAi by SpeaxManager::isGeneratingAi
     var currentRms by SpeaxManager::currentRms
     var aiRms by SpeaxManager::aiRms
+    var aiBands by SpeaxManager::aiBands
     var playbackProgress by SpeaxManager::playbackProgress
     var isMicMuted by SpeaxManager::isMicMuted
     var isAiPaused by SpeaxManager::isAiPaused
@@ -240,6 +241,13 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         isAppInForeground = true
         updateWakeLocks()
+        
+        // Force a mic sync when returning to foreground. 
+        // This recovers the mic if the OS killed it while we were backgrounded.
+        if (isConnected) {
+            SpeaxManager.syncRecordingState(force = true)
+            updateBackgroundService()
+        }
     }
 
     override fun onPause() {
@@ -804,6 +812,24 @@ fun ChatScreen() {
                         }
                         Spacer(Modifier.height(16.dp))
                     }
+
+                    // STT Version Toggle
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Real-time STT (v1)", color = MaterialTheme.colorScheme.onSurface)
+                            Text("Live partial updates and lower latency", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
+                        }
+                        Switch(
+                            checked = SpeaxManager.sttVersion >= 1,
+                            onCheckedChange = { isV1 -> 
+                                SpeaxManager.sttVersion = if (isV1) 1 else 0
+                                mainActivity.saveSettingsLocal()
+                                mainActivity.pushSettingsToServer()
+                            },
+                            colors = SwitchDefaults.colors(checkedThumbColor = MaterialTheme.colorScheme.primary, checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                        )
+                    }
+                    Spacer(Modifier.height(16.dp))
 
                     // Local TTS Toggle
                     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {

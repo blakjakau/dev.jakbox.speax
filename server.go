@@ -39,6 +39,13 @@ func generateID() string {
 	return fmt.Sprintf("%x", b)
 }
 
+func sanitizeFunctionName(s string) string {
+	// Gemini requires: [a-zA-Z0-9_.:-]
+	// We'll be conservative and replace everything else with '_'
+	reg := regexp.MustCompile(`[^a-zA-Z0-9_.:-]`)
+	return reg.ReplaceAllString(s, "_")
+}
+
 type FallbackLLMConfig struct {
 	URL    string   `json:"URL"`
 	Models []string `json:"Models"`
@@ -672,6 +679,7 @@ type ClientSession struct {
 	ActiveSeqID        int64                  `json:"-"`
 	BufferMutex        sync.Mutex             `json:"-"`
 	TurnMutex          sync.Mutex             `json:"-"` // Serializes AI responses/turns
+	STTStreams         map[int64]*stt.StreamSession `json:"-"`
 	ActiveCancel       context.CancelFunc     `json:"-"` // Global interrupt control
 	ToolDebounceTimer  *time.Timer            `json:"-"` // Debounces AI response after tool results
 	PassiveAssistant   bool                   `json:"passiveAssistant"`
@@ -1322,6 +1330,10 @@ func loadSession(clientID string) *ClientSession {
 			session.Theme = p.Theme
 		}
 		personasMutex.RUnlock()
+	}
+
+	if session.STTStreams == nil {
+		session.STTStreams = make(map[int64]*stt.StreamSession)
 	}
 
 	return session
@@ -2345,6 +2357,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					ClientStorage    bool   `json:"clientStorage"`
 					ClientTts        bool   `json:"clientTts"`
 					PassiveAssistant bool   `json:"passiveAssistant"`
+					Version          int    `json:"version"`
 				}
 				if err := json.Unmarshal([]byte(strings.TrimPrefix(text, "[SETTINGS]")), &settings); err == nil {
 					session.Mutex.Lock()
@@ -2357,7 +2370,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 						session.Voice != settings.Voice ||
 						session.ClientStorage != settings.ClientStorage ||
 						session.ClientTts != settings.ClientTts ||
-						session.PassiveAssistant != settings.PassiveAssistant
+						session.PassiveAssistant != settings.PassiveAssistant ||
+						session.Version != settings.Version
 					if changed {
 						session.UserName = settings.UserName
 						session.UserBio = settings.UserBio
@@ -2369,6 +2383,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 						session.ClientStorage = settings.ClientStorage
 						session.ClientTts = settings.ClientTts
 						session.PassiveAssistant = settings.PassiveAssistant
+						session.Version = settings.Version
 
 						// Clear fallback state if model/provider changed manually
 						session.FallbackOriginalModel = ""
@@ -2386,7 +2401,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					}
 					session.Mutex.Unlock()
 					if changed {
-						log.Printf("Updated settings for client %s: User=%s, Provider=%s, Model=%s, Voice=%s, Passive=%v", session.ClientID, session.UserName, session.Provider, session.Model, session.Voice, session.PassiveAssistant)
+						log.Printf("Updated settings for client %s: User=%s, Provider=%s, Model=%s, Voice=%s, Passive=%v, Version=%d", session.ClientID, session.UserName, session.Provider, session.Model, session.Voice, session.PassiveAssistant, session.Version)
 						saveSession(session)
 						sendSettings(nil, session)
 					}
@@ -2654,52 +2669,92 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 	session.BufferMutex.Lock()
 	defer session.BufferMutex.Unlock()
 
-	// Reset if sequence changes (prevents interleaving/orphaned buffers)
-	if session.ActiveSeqID != int64(seqID) {
-		session.ActiveSeqID = int64(seqID)
-		session.StreamingBuffer = nil // Reset on new sequence
-		session.StreamingStartTime = time.Now()
-	}
+	// VERSION GATING: Version 1+ uses real-time orchestrator, Version 0 uses legacy buffer-then-submit
+	if session.Version >= 1 {
+		stream, exists := session.STTStreams[int64(seqID)]
+		if !exists {
+			configMutex.RLock()
+			sampleRate := config.SampleRate
+			configMutex.RUnlock()
 
-	if packetType == 0x01 { // STREAM
-		session.StreamingBuffer = append(session.StreamingBuffer, audioData...)
-		log.Printf("[STT-Stream] Appended %d bytes to sequence %d", len(audioData), seqID)
-	} else if packetType == 0x02 { // END
-		fullBuffer := session.StreamingBuffer
-		session.StreamingBuffer = nil
-		session.ActiveSeqID = 0
+			// Select a healthy node for affinity (proper round-robin)
+			pinned, _ := sttManager.PickNode()
+			pinnedURL := ""
+			if pinned != nil {
+				pinnedURL = pinned.URL
+			}
 
-		go processStreamingWhisper(ws, session, fullBuffer)
+			stream = &stt.StreamSession{
+				Manager:    sttManager,
+				PinnedURL:  pinnedURL,
+				SampleRate: sampleRate,
+				OnUpdate: func(fullTranscript string) {
+					log.Printf("[STT-Live] %d: %s", seqID, fullTranscript)
+					targetWebClients(session, []byte("[STT_LIVE]:"+fullTranscript))
+				},
+			}
+			session.STTStreams[int64(seqID)] = stream
+			session.StreamingStartTime = time.Now()
+			log.Printf("[STT-Stream-v1] Started new session for sequence %d (Affinity: %s)", seqID, pinnedURL)
+		}
+
+		if packetType == 0x01 { // STREAM
+			stream.PushAudio(audioData)
+		} else if packetType == 0x02 { // END
+			// Final synchronous wrap-up to ensure the tail is processed
+			fullTranscript := stream.Finish()
+			
+			log.Printf("[STT-Stream-v1] Finalizing sequence %d (Full): %s", seqID, fullTranscript)
+			
+			// Clean up
+			delete(session.STTStreams, int64(seqID))
+
+			// Process the final transcript
+			go processStreamingWhisper(ws, session, fullTranscript)
+		}
+	} else {
+		// LEGACY PATH (Version 0)
+		// Reset if sequence changes (prevents interleaving/orphaned buffers)
+		if session.ActiveSeqID != int64(seqID) {
+			session.ActiveSeqID = int64(seqID)
+			session.StreamingBuffer = nil // Reset on new sequence
+			session.StreamingStartTime = time.Now()
+		}
+
+		if packetType == 0x01 { // STREAM
+			session.StreamingBuffer = append(session.StreamingBuffer, audioData...)
+			// No live feedback for legacy clients
+		} else if packetType == 0x02 { // END
+			fullBuffer := session.StreamingBuffer
+			session.StreamingBuffer = nil
+			session.ActiveSeqID = 0
+
+			log.Printf("[STT-Legacy] Finalizing sequence %d (%d bytes)", seqID, len(fullBuffer))
+
+			go func(audio []byte) {
+				configMutex.RLock()
+				sampleRate := config.SampleRate
+				configMutex.RUnlock()
+
+				text, err := sttManager.Transcribe(context.Background(), audio, sampleRate)
+				if err != nil {
+					log.Printf("[STT-Legacy] Transcription failed: %v", err)
+					safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
+					return
+				}
+				processStreamingWhisper(ws, session, text)
+			}(fullBuffer)
+		}
 	}
 }
 
-func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, audio []byte) {
-	configMutex.RLock()
-	sampleRate := config.SampleRate
-	configMutex.RUnlock()
+func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, text string) {
+	log.Printf("[STT-Stream] Processing Final Transcript: '%s'", text)
 
-	text, err := sttManager.Transcribe(context.Background(), audio, sampleRate)
-	if err != nil {
-		if strings.Contains(err.Error(), "all STT nodes are unhealthy") {
-			session.Mutex.Lock()
-			t := session.ActiveThread()
-			failMsg := "[System: All STT nodes are currently offline or unhealthy. The user's most recent audio could not be transcribed. Please inform the user of this service interruption and offer to help via text instead.]"
-			session.appendMessage("system", failMsg, t)
-			session.Mutex.Unlock()
-
-			ctx, cancel := context.WithCancel(context.Background())
-			session.Mutex.Lock()
-			session.ActiveCancel = cancel
-			session.Mutex.Unlock()
-
-			if err := streamLLMAndTTS(ctx, "[SYSTEM_STT_FAILURE]", ws, session); err != nil {
-				log.Println("LLM stt failure stream error:", err)
-			}
-		}
-		log.Println("Whisper error:", err)
+	if text == "" {
+		log.Println("[STT-Stream] Empty final transcript, ignoring.")
 		return
 	}
-	log.Printf("[STT-Stream] Final Whisper Transcribed: '%s'", text)
 
 	filteredText, isArtifact := stt.Filter(text)
 	if isArtifact {
@@ -2713,23 +2768,26 @@ func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, audio [
 		return
 	}
 
-	if text != "" && shouldProcessPrompt(session, text, session.StreamingStartTime) {
-		session.Mutex.Lock()
-		if session.ActiveCancel != nil {
-			session.ActiveCancel()
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		session.ActiveCancel = cancel
-		session.Mutex.Unlock()
+	if text != "" {
+		if shouldProcessPrompt(session, text, session.StreamingStartTime) {
+			session.Mutex.Lock()
+			if session.ActiveCancel != nil {
+				session.ActiveCancel()
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			session.ActiveCancel = cancel
+			session.Mutex.Unlock()
 
-		sendOrBroadcastText(nil, session, []byte("[CHAT]:"+text))
+			sendOrBroadcastText(nil, session, []byte("[CHAT]:"+text))
 
-		if err := streamLLMAndTTS(ctx, text, ws, session); err != nil {
-			log.Println("LLM stream error:", err)
+			if err := streamLLMAndTTS(ctx, text, ws, session); err != nil {
+				log.Println("LLM stream error:", err)
+			}
+			log.Println("[LLM-Stream] Stream complete.")
+		} else {
+			log.Printf("[STT-Stream] Prompt IGNORED (Passive Mode / No Wake Word): '%s'", text)
+			safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
 		}
-		log.Println("[LLM-Stream] Stream complete.")
-	} else {
-		safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
 	}
 }
 
@@ -2793,8 +2851,8 @@ func getNativeToolsGemini(session *ClientSession) []interface{} {
 
 	for _, tool := range allTools {
 		for _, action := range tool.Actions {
-			// Map ToolName.ActionName to ToolName_ActionName
-			nativeName := fmt.Sprintf("%s_%s", tool.Name, action.Name)
+			// Map ToolName:ActionName, and sanitize for Gemini (replace spaces etc)
+			nativeName := sanitizeFunctionName(fmt.Sprintf("%s:%s", tool.Name, action.Name))
 
 			functions = append(functions, map[string]interface{}{
 				"name":        nativeName,
@@ -2827,7 +2885,8 @@ func getNativeToolsOllama(session *ClientSession) []interface{} {
 
 	for _, tool := range allTools {
 		for _, action := range tool.Actions {
-			nativeName := fmt.Sprintf("%s_%s", tool.Name, action.Name)
+			// Use same sanitized name for Ollama to be consistent
+			nativeName := sanitizeFunctionName(fmt.Sprintf("%s:%s", tool.Name, action.Name))
 
 			tools = append(tools, map[string]interface{}{
 				"type": "function",
@@ -2844,14 +2903,25 @@ func getNativeToolsOllama(session *ClientSession) []interface{} {
 }
 
 func executeNativeToolCall(session *ClientSession, nativeName string, args map[string]interface{}, ws *websocket.Conn) {
-	parts := strings.SplitN(nativeName, "_", 2)
-	if len(parts) < 2 {
-		log.Printf("Invalid native tool name: %s", nativeName)
-		return
+	var toolName, actionName string
+
+	// 1. Try splitting by ':' (the new standard)
+	parts := strings.SplitN(nativeName, ":", 2)
+	if len(parts) == 2 {
+		toolName = parts[0]
+		actionName = parts[1]
+	} else {
+		// 2. Try splitting by '_' (legacy support for simple internal tools or history)
+		parts = strings.SplitN(nativeName, "_", 2)
+		if len(parts) == 2 {
+			toolName = parts[0]
+			actionName = parts[1]
+		} else {
+			log.Printf("Invalid native tool name: %s", nativeName)
+			return
+		}
 	}
 
-	toolName := parts[0]
-	actionName := parts[1]
 	executionId := fmt.Sprintf("req-%d", time.Now().UnixNano()%1000000)
 
 	log.Printf("Executing native tool call: %s.%s (ID: %s) | Args: %v", toolName, actionName, executionId, args)
@@ -2882,7 +2952,7 @@ func executeNativeToolCall(session *ClientSession, nativeName string, args map[s
 		log.Print(label)
 	}
 
-	if toolName == "Assistant" && actionName == "sleep" {
+	if (toolName == "Assistant" || sanitizeFunctionName("Assistant") == toolName) && actionName == "sleep" {
 		session.Mutex.Lock()
 		session.PassiveAssistant = true
 		session.PassiveBlockUntil = time.Now().Add(15 * time.Second)
@@ -2900,7 +2970,7 @@ func executeNativeToolCall(session *ClientSession, nativeName string, args map[s
 		return // DO NOT trigger ToolDebounceTimer (suppress LLM)
 	}
 
-	if toolName == "LongTermMemory" {
+	if toolName == "LongTermMemory" || sanitizeFunctionName("LongTermMemory") == toolName {
 		var err error
 		var statusMsg string
 
@@ -2950,20 +3020,35 @@ func executeNativeToolCall(session *ClientSession, nativeName string, args map[s
 	id := session.appendNativeToolCall(nativeName, args, session.ActiveThread())
 	session.Mutex.Unlock()
 
+	// Find the targeted tool in the session to get the original tool name
+	var actualToolName string
+	session.Mutex.Lock()
+	for name := range session.Tools {
+		if name == toolName || sanitizeFunctionName(name) == toolName {
+			actualToolName = name
+			break
+		}
+	}
+	session.Mutex.Unlock()
+
+	if actualToolName == "" {
+		actualToolName = toolName // Last ditch effort
+	}
+
 	toolCall := struct {
 		ToolName    string      `json:"toolName"`
 		ActionName  string      `json:"actionName"`
 		ExecutionId string      `json:"executionId"`
 		Params      interface{} `json:"params"`
 	}{
-		ToolName:    toolName,
+		ToolName:    actualToolName,
 		ActionName:  actionName,
 		ExecutionId: id,
 		Params:      args,
 	}
 
 	executePayload, _ := json.Marshal(toolCall)
-	err := targetToolClient(session, toolName, []byte("[TOOL_EXECUTE]"+string(executePayload)))
+	err := targetToolClient(session, actualToolName, []byte("[TOOL_EXECUTE]"+string(executePayload)))
 	if err != nil {
 		log.Printf("Failed to route native tool call: %v", err)
 		session.Mutex.Lock()

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -76,7 +77,8 @@ func (m *Manager) GetStatus() []*Node {
 	return copy
 }
 
-func (m *Manager) getHealthyNode() (*Node, error) {
+// PickNode returns a healthy node using the internal round-robin index.
+func (m *Manager) PickNode() (*Node, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -95,10 +97,37 @@ func (m *Manager) getHealthyNode() (*Node, error) {
 	return nil, fmt.Errorf("all STT nodes are unhealthy")
 }
 
+func (m *Manager) getHealthyNode() (*Node, error) {
+	return m.PickNode()
+}
+
 // Transcribe sends audio data to a healthy node and returns the transcribed text.
 func (m *Manager) Transcribe(ctx context.Context, pcmData []byte, sampleRate int) (string, error) {
+	node, err := m.getHealthyNode()
+	if err != nil {
+		return "", err
+	}
+	return m.TranscribePinned(ctx, pcmData, sampleRate, node.URL)
+}
+
+// TranscribePinned sends audio data to a SPECIFIC node (for server affinity) and returns the transcribed text.
+func (m *Manager) TranscribePinned(ctx context.Context, pcmData []byte, sampleRate int, pinnedURL string) (string, error) {
 	if len(pcmData) == 0 {
 		return "", fmt.Errorf("empty audio data")
+	}
+
+	var node *Node
+	m.mu.RLock()
+	for _, n := range m.nodes {
+		if n.URL == pinnedURL {
+			node = n
+			break
+		}
+	}
+	m.mu.RUnlock()
+
+	if node == nil {
+		return m.Transcribe(ctx, pcmData, sampleRate) // Fallback to healthy if pinned is gone
 	}
 
 	durationSecs := float64(len(pcmData)) / float64(sampleRate*2)
@@ -107,87 +136,311 @@ func (m *Manager) Transcribe(ctx context.Context, pcmData []byte, sampleRate int
 
 	wavData := AddWavHeader(pcmData, sampleRate)
 
-	for attempt := 0; attempt < 3; attempt++ {
-		node, err := m.getHealthyNode()
-		if err != nil {
-			return "", err
-		}
+	// Single attempt for pinned node (caller handles re-routing if needed)
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", `form-data; name="file"; filename="input.wav"`)
+	h.Set("Content-Type", "audio/wav")
+	part, _ := writer.CreatePart(h)
+	part.Write(wavData)
+	writer.Close()
 
-		body := &bytes.Buffer{}
-		writer := multipart.NewWriter(body)
-		h := make(textproto.MIMEHeader)
-		h.Set("Content-Disposition", `form-data; name="file"; filename="input.wav"`)
-		h.Set("Content-Type", "audio/wav")
-		part, _ := writer.CreatePart(h)
-		part.Write(wavData)
-		writer.Close()
+	start := time.Now()
+	req, err := http.NewRequestWithContext(ctx, "POST", node.URL, body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-		if m.onLog != nil {
-			m.onLog(fmt.Sprintf("[STT] Sending audio to node: %s (Attempt %d)", node.URL, attempt+1))
-		}
+	resp, err := http.DefaultClient.Do(req)
+	duration := time.Since(start)
 
-		start := time.Now()
-		req, err := http.NewRequestWithContext(ctx, "POST", node.URL, body)
-		if err != nil {
-			return "", err
-		}
-		req.Header.Set("Content-Type", writer.FormDataContentType())
+	m.mu.Lock()
+	node.LastExecutionTime = duration
+	node.TotalRequests++
+	if err != nil {
+		node.FailureCount++
+		node.TotalFailures++
+		m.mu.Unlock()
+		return "", fmt.Errorf("pinned transcription request failed: %v", err)
+	}
+	defer resp.Body.Close()
 
-		resp, err := http.DefaultClient.Do(req)
-		duration := time.Since(start)
-
-		// Update metrics
-		node.LastExecutionTime = duration
-		ratio := duration.Seconds() / timeoutDuration.Seconds()
-		const alpha = 0.2
-		if node.RollingCutoffRatio == 0 {
-			node.RollingCutoffRatio = ratio
-		} else {
-			node.RollingCutoffRatio = (ratio * alpha) + (node.RollingCutoffRatio * (1.0 - alpha))
-		}
-
-		node.TotalRequests++
-		if err != nil || resp.StatusCode != http.StatusOK || duration > timeoutDuration {
-			node.FailureCount++
-			node.TotalFailures++
-
-			statusStr := "N/A"
-			if resp != nil {
-				statusStr = resp.Status
-				resp.Body.Close()
-			}
-
-			if node.FailureCount >= 5 {
-				node.Zombie = true
-				if m.onLog != nil {
-					m.onLog(fmt.Sprintf("[STT] Node flagged: %s (Duration: %v, Cutoff Ratio: %.2f, Status: %s, Err: %v).", node.URL, duration, ratio, statusStr, err))
-				}
-			} else {
-				if m.onLog != nil {
-					m.onLog(fmt.Sprintf("[STT] Node attempt failed: %s (Duration: %v, Cutoff Ratio: %.2f, Status: %s, Err: %v). Failures: %d/5", node.URL, duration, ratio, statusStr, err, node.FailureCount))
-				}
-			}
-			continue // Retry with another node
-		}
-
-		node.Zombie = false
-		node.LastResponseTime = duration
-		node.FailureCount = 0
-		if m.onLog != nil {
-			m.onLog(fmt.Sprintf("[STT] Node response: %s (Duration: %v, Cutoff Ratio: %.2f)", node.URL, duration.Truncate(time.Millisecond), ratio))
-		}
-
-		defer resp.Body.Close()
-		var result struct {
-			Text string `json:"text"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return "", err
-		}
-		return result.Text, nil
+	if resp.StatusCode != http.StatusOK || duration > timeoutDuration {
+		node.FailureCount++
+		node.TotalFailures++
+		m.mu.Unlock()
+		return "", fmt.Errorf("pinned transcription failed (status: %s, duration: %v)", resp.Status, duration)
 	}
 
-	return "", fmt.Errorf("transcription failed after multiple attempts")
+	node.Zombie = false
+	node.LastResponseTime = duration
+	node.FailureCount = 0
+	m.mu.Unlock()
+
+	var result struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	return result.Text, nil
+}
+
+// StreamSession manages an active streaming transcription session.
+type StreamSession struct {
+	Manager            *Manager
+	PinnedURL          string
+	AudioBuffer        []byte
+	StableTranscript   string
+	SpeculativeTrans   string
+	LastInferenceAudio []byte
+	SampleRate         int
+	OnUpdate           func(fullTranscript string)
+	
+	mu               sync.Mutex
+	inferenceActive  bool
+	inferencePending bool
+	finishing        bool
+}
+
+// PushAudio appends new audio data and triggers opportunistic inferences.
+func (s *StreamSession) PushAudio(data []byte) {
+	s.mu.Lock()
+	if s.finishing {
+		s.mu.Unlock()
+		return
+	}
+	s.AudioBuffer = append(s.AudioBuffer, data...)
+	bufferLen := len(s.AudioBuffer)
+	
+	if s.inferenceActive {
+		s.inferencePending = true
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+
+	// Heuristic: Trigger inference every 1.5 seconds of new audio
+	// or if we have at least 1.5 seconds and the energy is low (silence detection).
+	if bufferLen >= int(float64(s.SampleRate)*2*1.5) { // Min 1.5s
+		energy := AudioEnergy(data)
+		isSilence := energy < 0.05 // Slightly higher threshold for better responsiveness
+
+		if bufferLen >= int(float64(s.SampleRate)*2*7.5) || isSilence { // Max 7.5s or silence
+			s.mu.Lock()
+			if !s.inferenceActive {
+				s.inferenceActive = true
+				s.mu.Unlock()
+				go s.runInference()
+			} else {
+				s.inferencePending = true
+				s.mu.Unlock()
+			}
+		}
+	}
+}
+
+func (s *StreamSession) runInference() {
+	for {
+		s.mu.Lock()
+		audio := make([]byte, len(s.AudioBuffer))
+		copy(audio, s.AudioBuffer)
+		pinned := s.PinnedURL
+		sampleRate := s.SampleRate
+		s.mu.Unlock()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		text, err := s.Manager.TranscribePinned(ctx, audio, sampleRate, pinned)
+		cancel()
+
+		if err == nil {
+			var fullUpdate string
+			s.mu.Lock()
+			// 1. Basic consensus/alignment logic
+			stable, speculative := alignTranscripts(s.SpeculativeTrans, text)
+			
+			if stable != "" {
+				if s.StableTranscript != "" {
+					s.StableTranscript += " "
+				}
+				s.StableTranscript += stable
+			}
+			s.SpeculativeTrans = speculative
+			
+			if s.OnUpdate != nil {
+				fullUpdate = s.StableTranscript
+				if fullUpdate != "" && s.SpeculativeTrans != "" {
+					fullUpdate += " "
+				}
+				fullUpdate += s.SpeculativeTrans
+			}
+			s.mu.Unlock()
+
+			if fullUpdate != "" && s.OnUpdate != nil {
+				s.OnUpdate(fullUpdate)
+			}
+		}
+
+		s.mu.Lock()
+		if !s.inferencePending || s.finishing {
+			s.inferenceActive = false
+			s.inferencePending = false
+			s.mu.Unlock()
+			return
+		}
+		s.inferencePending = false
+		s.mu.Unlock()
+		// Loop continue...
+	}
+}
+
+// Finish signals the end of the stream and performs one last synchronous inference.
+// It returns the final, combined transcript.
+func (s *StreamSession) Finish() string {
+	s.mu.Lock()
+	s.finishing = true
+	// Wait for any active inference to complete
+	for s.inferenceActive {
+		s.mu.Unlock()
+		time.Sleep(50 * time.Millisecond) // Simple poll instead of cond-var for simplicity
+		s.mu.Lock()
+	}
+	
+	// Final synchronous call if there's audio left
+	audio := make([]byte, len(s.AudioBuffer))
+	copy(audio, s.AudioBuffer)
+	pinned := s.PinnedURL
+	sampleRate := s.SampleRate
+	
+	// If no audio, just return current state
+	if len(audio) == 0 {
+		stable := s.StableTranscript
+		if stable != "" && s.SpeculativeTrans != "" {
+			stable += " "
+		}
+		stable += s.SpeculativeTrans
+		s.mu.Unlock()
+		return stable
+	}
+	s.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Final full transcription
+	text, err := s.Manager.TranscribePinned(ctx, audio, sampleRate, pinned)
+	if err != nil {
+		// Fallback to what we have if final call fails
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		full := s.StableTranscript
+		if full != "" && s.SpeculativeTrans != "" {
+			full += " "
+		}
+		full += s.SpeculativeTrans
+		return full
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	// Final batch transcription is the ground truth for the whole session.
+	// Since Whisper transcribes from the beginning, if the final call 
+	// succeeded, it is more accurate than any partial segment alignment.
+	if text != "" {
+		return text
+	}
+	
+	full := s.StableTranscript
+	if full != "" && s.SpeculativeTrans != "" {
+		full += " "
+	}
+	full += s.SpeculativeTrans
+	return full
+}
+
+// alignTranscripts attempts to find a stable prefix between an old speculative result 
+// and a new one. It returns the stable prefix and the updated speculative part.
+func alignTranscripts(old, new string) (stablePrefix, newSpeculative string) {
+	oldWords := strings.Fields(old)
+	newWords := strings.Fields(new)
+	
+	if len(oldWords) == 0 {
+		return "", new
+	}
+	
+	// Case 1: Simple prefix match (new is longer and starts with old)
+	// If the new result is a strict superset of the old result, 
+	// we can safely advance everything in 'old' that isn't the very last word.
+	isSuperset := true
+	if len(newWords) < len(oldWords) {
+		isSuperset = false
+	} else {
+		for i := 0; i < len(oldWords); i++ {
+			if !strings.EqualFold(oldWords[i], newWords[i]) {
+				isSuperset = false
+				break
+			}
+		}
+	}
+
+	if isSuperset && len(oldWords) >= 3 {
+		// Advance all but the last 2 words as stable
+		stableIdx := len(oldWords) - 2
+		stablePrefix = strings.Join(oldWords[:stableIdx], " ")
+		newSpeculative = strings.Join(newWords[stableIdx:], " ")
+		return stablePrefix, newSpeculative
+	}
+
+	// Case 2: Sliding window match (overlap)
+	// Find the longest suffix of oldWords that matches a prefix of newWords.
+	maxOverlap := 0
+	overlapFoundAt := -1
+	for i := 0; i < len(oldWords); i++ {
+		overlap := 0
+		for j := 0; j < len(newWords) && i+j < len(oldWords); j++ {
+			if strings.EqualFold(oldWords[i+j], newWords[j]) {
+				overlap++
+			} else {
+				break
+			}
+		}
+		// If it matches until the end of oldWords, it's a candidate
+		if i+overlap == len(oldWords) && overlap > maxOverlap {
+			maxOverlap = overlap
+			overlapFoundAt = i
+		}
+	}
+	
+	if maxOverlap >= 2 && overlapFoundAt >= 0 {
+		// Stable prefix is everything in old before the match started
+		stablePrefix = strings.Join(oldWords[:overlapFoundAt], " ")
+		newSpeculative = new
+		return stablePrefix, newSpeculative
+	}
+	
+	// No strong consensus, just update speculative part
+	return "", new
+}
+
+// AudioEnergy calculates the RMS energy of 16-bit PCM mono audio data.
+func AudioEnergy(pcmData []byte) float64 {
+	if len(pcmData) == 0 {
+		return 0
+	}
+	var sum float64
+	count := 0
+	for i := 0; i < len(pcmData)-1; i += 2 {
+		sample := int16(binary.LittleEndian.Uint16(pcmData[i : i+2]))
+		sum += float64(sample) * float64(sample)
+		count++
+	}
+	if count == 0 {
+		return 0
+	}
+	return math.Sqrt(sum / float64(count)) / 32768.0
 }
 
 // Filter determines if a transcription should be ignored as an artifact/hallucination.
@@ -205,10 +458,10 @@ func Filter(text string) (string, bool) {
 	lower := strings.ToLower(text)
 	cleaner := strings.Trim(lower, ".,!? ")
 
-	// Common Whisper artifacts/hallucinations
+	// Common Whisper artifacts/hallucinations (robotic phrases)
 	artifacts := []string{
-		"thank you", "thank you.", "thank you for watching", "thanks for watching",
-		"bye", "goodbye", "you", "please like and subscribe",
+		"thank you.", "thank you for watching", "thanks for watching",
+		"please like and subscribe", "youtube.com", "re-encoded by",
 	}
 
 	for _, a := range artifacts {

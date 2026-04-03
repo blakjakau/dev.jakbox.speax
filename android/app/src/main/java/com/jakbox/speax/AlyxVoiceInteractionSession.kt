@@ -115,13 +115,33 @@ class AlyxVoiceInteractionSession(context: Context) : VoiceInteractionSession(co
 
     @Composable
     fun AssistantOverlay() {
-        val aiAnimatedIntensity = remember { mutableFloatStateOf(0f) }
+        val aiAnimatedBands = remember { mutableStateListOf(0f, 0f, 0f, 0f, 0f) }
+        val aiOverallIntensity = remember { mutableFloatStateOf(0f) }
+        val aiRotations = remember { mutableStateListOf(0f, 0f, 0f, 0f, 0f) }
+
         LaunchedEffect(Unit) {
             while (true) {
                 androidx.compose.runtime.withFrameNanos {
-                    val target = if (SpeaxManager.isConnected && !SpeaxManager.isAiPaused) (SpeaxManager.aiRms / 6000f).coerceIn(0f, 1f) else 0f
-                    val step = if (target > aiAnimatedIntensity.floatValue) 0.4f else 0.05f
-                    aiAnimatedIntensity.floatValue += (target - aiAnimatedIntensity.floatValue) * step
+                    val isActive = SpeaxManager.isConnected && !SpeaxManager.isAiPaused && (SpeaxManager.isGeneratingAi || SpeaxManager.playbackProgress > 0f)
+                    val targets = if (isActive) SpeaxManager.aiBands else listOf(0f, 0f, 0f, 0f, 0f)
+                    val rmsTarget = if (isActive) (SpeaxManager.aiRms / 6000f).coerceIn(0f, 1f) else 0f
+                    
+                    // Animate each band individually for the deformation
+                    for (i in 0 until 5) {
+                        val target = targets.getOrElse(i) { 0f }
+                        val current = aiAnimatedBands[i]
+                        val step = if (target > current) 0.25f else 0.1f
+                        aiAnimatedBands[i] = current + (target - current) * step
+
+                        // Per-layer rotation speed linked to band intensity
+                        val baseSpeed = 0.02f 
+                        val intensityBonus = aiAnimatedBands[i] * 0.8f
+                        aiRotations[i] = (aiRotations[i] + baseSpeed + intensityBonus)
+                    }
+                    
+                    // Animate overall intensity for scaling the main button
+                    val step = if (rmsTarget > aiOverallIntensity.floatValue) 0.4f else 0.05f
+                    aiOverallIntensity.floatValue += (rmsTarget - aiOverallIntensity.floatValue) * step
                 }
             }
         }
@@ -164,8 +184,9 @@ class AlyxVoiceInteractionSession(context: Context) : VoiceInteractionSession(co
             Box(contentAlignment = Alignment.Center) {
                 // AI Pulsing Glow
                 AiPulsingGlow(
-                    intensityProvider = { aiAnimatedIntensity.floatValue },
-                    modifier = Modifier.size(240.dp).offset(y = -shiftAmount)
+                    bands = aiAnimatedBands,
+                    rotations = aiRotations,
+                    modifier = Modifier.size(360.dp).offset(y = -shiftAmount)
                 )
                 
                 // Main Logo Disc
@@ -184,7 +205,7 @@ class AlyxVoiceInteractionSession(context: Context) : VoiceInteractionSession(co
                             CircleShape
                         )
                         .graphicsLayer {
-                            val scale = 1f + (aiAnimatedIntensity.floatValue * 0.15f)
+                            val scale = 1f + (aiOverallIntensity.floatValue * 0.15f)
                             scaleX = scale
                             scaleY = scale
                         },

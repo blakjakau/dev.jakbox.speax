@@ -15,7 +15,7 @@ import java.io.File
 import org.json.JSONObject
 import com.k2fsa.sherpa.onnx.*
 
-data class UiMessage(val role: String, val content: String)
+data class UiMessage(val role: String, val content: String, val isLive: Boolean = false)
 data class ThreadItem(val id: String, val name: String, val createdAt: String = "", val updatedAt: String = "")
 data class PersonaVoice(val id: String, val name: String, val voiceFile: String)
 
@@ -59,6 +59,7 @@ object SpeaxManager {
     var statusText by mutableStateOf("Disconnected")
     var currentRms by mutableStateOf(0f)
     var aiRms by mutableStateOf(0f)
+    var aiBands by mutableStateOf(listOf(0f, 0f, 0f, 0f, 0f))
     var currentTtsSampleRate = 22050
     var playbackProgress by mutableStateOf(0f)
     var isMicMuted by mutableStateOf(false)
@@ -83,6 +84,7 @@ object SpeaxManager {
     var useNativeStt by mutableStateOf(false)
     var isNativeSttSupported by mutableStateOf(false)
     var currentTheme by mutableStateOf<SpeaxThemeData?>(null)
+    var sttVersion by mutableStateOf(1)
 
     var availableModels = mutableStateListOf<String>()
     var isLoadingModels by mutableStateOf(false)
@@ -199,8 +201,9 @@ object SpeaxManager {
             onSpeechStart = {
                 statusText = "Recording (Speaking)..."
             },
-            onAiVolumeChange = { rms ->
+            onAiDataChange = { rms, bands ->
                 aiRms = rms
+                aiBands = bands
             },
             onBufferProgress = { progress ->
                 playbackProgress = progress
@@ -209,6 +212,16 @@ object SpeaxManager {
                 speaxWebSocket?.sendText("[PLAYBACK_COMPLETE]")
                 audioEngine.isPlaybackActive = false
                 restoreMicMuteState()
+            },
+            onTextPlayed = { text ->
+                CoroutineScope(Dispatchers.Main).launch {
+                    if (isGeneratingAi) {
+                        val lastMsg = messages.lastOrNull()
+                        if (lastMsg != null && lastMsg.role == "assistant") {
+                            messages[messages.lastIndex] = lastMsg.copy(content = lastMsg.content + text)
+                        }
+                    }
+                }
             },
             onStreamingChunk = { pcmData, seqID, type ->
                 speaxWebSocket?.sendStreamingChunk(type, seqID, pcmData)
@@ -233,6 +246,7 @@ object SpeaxManager {
         isNativeSttSupported = android.speech.SpeechRecognizer.isRecognitionAvailable(this.context)
         micProfile = prefs.getString("mic_profile", "standard") ?: "standard"
         audioEngine.micProfile = micProfile
+        sttVersion = prefs.getInt("stt_version", 1)
         
         // Initialize Piper Engine
         piperEngine = PiperEngine(this.context)
@@ -253,6 +267,7 @@ object SpeaxManager {
             put("clientStorage", false)
             put("clientTts", useLocalTts)
             put("passiveAssistant", passiveAssistant)
+            put("version", sttVersion)
         }
         speaxWebSocket?.sendText("[SETTINGS]$settingsJson")
     }
@@ -269,6 +284,7 @@ object SpeaxManager {
             putBoolean("use_local_tts", useLocalTts)
             putBoolean("passive_assistant", passiveAssistant)
             putBoolean("use_native_stt", useNativeStt)
+            putInt("stt_version", sttVersion)
         }.apply()
     }
     
@@ -348,7 +364,7 @@ object SpeaxManager {
 
         val serverUrl = "wss://speax.jakbox.dev/ws"
         val deviceName = java.net.URLEncoder.encode("${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}", "UTF-8")
-        val fullUrl = "$serverUrl?client=android&device=$deviceName&version=1"
+        val fullUrl = "$serverUrl?client=android&device=$deviceName&version=$sttVersion"
         
         statusText = "Connecting..."
         speaxWebSocket?.disconnect()
@@ -368,6 +384,11 @@ object SpeaxManager {
                     statusText = "Connected"
                     ws.sendText("[REQUEST_SYNC]")
                     
+                    // Cleanup any leftover results if we just reconnected
+                    CoroutineScope(Dispatchers.Main).launch {
+                        messages.removeAll { it.isLive }
+                    }
+                    
                     val now = System.currentTimeMillis()
                     if (now - lastToneTime > 2000) {
                         notificationSounds.playConnect()
@@ -378,7 +399,7 @@ object SpeaxManager {
                     // before we aggressively jam the mic open!
                     CoroutineScope(Dispatchers.IO).launch {
                         kotlinx.coroutines.delay(300) 
-                        syncRecordingState()
+                        syncRecordingState(force = true)
                     }
                 }
             },
@@ -490,11 +511,12 @@ object SpeaxManager {
 
     /**
      * Centralized logic to ensure the microphone hardware state matches the app's logical state.
+     * @param force If true, forces a full restart of the audio engine even if it thinks it's already recording.
      */
-    fun syncRecordingState() {
+    fun syncRecordingState(force: Boolean = false) {
         if (isConnected && !isMicMuted && !isAiPaused && !useNativeStt) {
-            Log.d("SpeaxManager", "syncRecordingState: All conditions met, starting mic.")
-            audioEngine.startRecording()
+            Log.d("SpeaxManager", "syncRecordingState: All conditions met, starting mic (force=$force).")
+            audioEngine.startRecording(force)
         } else {
             Log.d("SpeaxManager", "syncRecordingState: Mic should be off (connected=$isConnected, muted=$isMicMuted, paused=$isAiPaused, nativeStt=$useNativeStt). Stopping.")
             audioEngine.stopRecording()
@@ -578,7 +600,6 @@ object SpeaxManager {
                             when (json.optString("type")) {
                                 "start" -> {
                                     currentTtsSampleRate = json.optInt("sampleRate", 22050)
-                                    audioEngine.prepareForNewStream()
                                     Log.d("SpeaxManager", "Remote TTS Start: sampleRate=$currentTtsSampleRate")
                                 }
                             }
@@ -594,7 +615,7 @@ object SpeaxManager {
                                     val voiceToUse = persona?.voiceFile ?: aiVoice
                                     val audioBytes = piperEngine.synthesize(chunk, voiceToUse)
                                     if (audioBytes != null && audioBytes.isNotEmpty()) {
-                                        audioEngine.playAudioChunk(audioBytes)
+                                        audioEngine.playAudioChunk(audioBytes, 22050, associatedText = chunk)
                                     }
                                 }
                             }
@@ -658,7 +679,9 @@ object SpeaxManager {
                 text == "[AI_START]" -> {
                     CoroutineScope(Dispatchers.Main).launch {
                         isGeneratingAi = true
+                        audioEngine.prepareForNewResponse()
                         isAiPaused = false 
+                        messages.removeAll { it.isLive } // Finalize user bubble cleanup
                         messages.add(UiMessage("assistant", ""))
                         statusText = "$assistantName is speaking..."
                         
@@ -686,12 +709,24 @@ object SpeaxManager {
                     // to prevent it from falling into the 'else' block and being added to history.
                     Log.d("SpeaxManager", "Whisper status update received")
                 }
+                text.startsWith("[STT_LIVE]:") -> {
+                    val content = text.removePrefix("[STT_LIVE]:").trim()
+                    CoroutineScope(Dispatchers.Main).launch {
+                        val last = messages.lastOrNull()
+                        if (last?.isLive == true && last.role == "user") {
+                            messages[messages.lastIndex] = last.copy(content = content)
+                        } else {
+                            messages.add(UiMessage(role = "user", content = content, isLive = true))
+                        }
+                    }
+                }
                 text.startsWith("[CHAT]:") -> {
                     val content = text.removePrefix("[CHAT]:").trim()
                     if (content.isNotBlank()) {
                         audioEngine.abortPlayback()
                         CoroutineScope(Dispatchers.Main).launch {
                             isAiPaused = false
+                            messages.removeAll { it.isLive } // Remove any ephemeral STT logs
                             messages.add(UiMessage("user", content))
                             audioEngine.isPlaybackActive = false
                             restoreMicMuteState()
@@ -724,12 +759,17 @@ object SpeaxManager {
                     }
                     CoroutineScope(Dispatchers.Main).launch {
                         if (isGeneratingAi) {
-                            val lastMsg = messages.lastOrNull()
-                            if (lastMsg != null && lastMsg.role == "assistant") {
-                                messages[messages.lastIndex] = lastMsg.copy(content = lastMsg.content + text)
+                            // If we're not using local TTS, or it's a non-TTS block, render it now.
+                            // Otherwise, it gets rendered in the sync callback.
+                            if (!useLocalTts) {
+                                val lastMsg = messages.lastOrNull()
+                                if (lastMsg != null && lastMsg.role == "assistant") {
+                                    messages[messages.lastIndex] = lastMsg.copy(content = lastMsg.content + text)
+                                }
                             }
-                        } else if (text.isNotBlank()) {
+                        } else if (text.isNotBlank() && !text.startsWith("[")) {
                             isAiPaused = false
+                            messages.removeAll { it.isLive } 
                             messages.add(UiMessage("user", text.trim()))
                         }
                     }

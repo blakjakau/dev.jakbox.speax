@@ -13,9 +13,10 @@ class AudioEngine(
     private val onSpeechFinalized: (ByteArray, Long) -> Unit,
     private val onVolumeChange: (Float) -> Unit = {},
     private val onSpeechStart: () -> Unit = {},
-    private val onAiVolumeChange: (Float) -> Unit = {},
+    private val onAiDataChange: (Float, List<Float>) -> Unit = { _, _ -> },
     private val onBufferProgress: (Float) -> Unit = {},
     private val onPlaybackComplete: () -> Unit = {},
+    private val onTextPlayed: (String) -> Unit = {},
     private val onStreamingChunk: (ByteArray, Long, Byte) -> Unit = { _, _, _ -> }
 ) {
 
@@ -26,7 +27,7 @@ class AudioEngine(
     private var audioTrack: AudioTrack? = null
     private var playbackThread: Thread? = null
     private var progressThread: Thread? = null
-    private val audioQueue = LinkedBlockingQueue<Pair<ByteArray, Int>>()
+    private val audioQueue = LinkedBlockingQueue<Triple<ByteArray, Int, String?>>()
     @Volatile private var isPausedLocally = false
     var isMicMuted = false
         set(value) {
@@ -43,7 +44,9 @@ class AudioEngine(
     var averageSpeechRms = 600.0 // Baseline adaptive RMS tracker
     private var totalAiFrames = 0
     private var totalWrittenFrames = 0
-    private val rmsQueue = java.util.concurrent.ConcurrentLinkedQueue<Pair<Int, Float>>()
+    // Stores (StartFrame, RMS, Bands)
+    private val audioDataQueue = java.util.concurrent.ConcurrentLinkedQueue<Triple<Int, Float, List<Float>>>()
+    private val textSyncQueue = java.util.concurrent.ConcurrentLinkedQueue<Pair<Int, String>>()
     private var currentSeqID = 0L
 
     var noiseThreshold = 255.0
@@ -95,59 +98,67 @@ class AudioEngine(
     }
 
     @SuppressLint("MissingPermission")
-    fun startRecording() {
-        if (isRecording) {
+    fun startRecording(force: Boolean = false) {
+        if (isRecording && !force) {
             Log.d("AudioEngine", "startRecording: Already recording, skipping re-init.")
             return
         }
         
-        Log.d("AudioEngine", "Starting recording with profile=$micProfile, threshold=$noiseThreshold, muted=$isMicMuted")
+        Log.d("AudioEngine", "Starting recording (force=$force) with profile=$micProfile, threshold=$noiseThreshold, muted=$isMicMuted")
         
-        // Safety: Ensure any previous session is stopped first
-        nativeAudioEngine?.stop()
-        
-        // Give the OS a moment to fully release the hardware resource
-        try {
-            Thread.sleep(100)
-        } catch (e: InterruptedException) {
-            // ignore
-        }
-        
-        nativeAudioEngine?.setProfile(micProfile)
-        nativeAudioEngine?.setThreshold(noiseThreshold)
-        nativeAudioEngine?.setMuted(isMicMuted) // Apply current mute state
-        nativeAudioEngine?.setPlaybackActive(isPlaybackActive) // Apply current playback state
-        currentSeqID = System.currentTimeMillis()
-        
-        // Retry logic: opening the mic can fail if the audio system is busy or transitioning modes
-        var attempts = 3
-        while (attempts > 0) {
-            val result = nativeAudioEngine?.start() ?: -1
-            if (result == 0) {
-                Log.d("AudioEngine", "Native audio engine started successfully.")
-                isRecording = true
-                break
+        // Use a background thread for everything that follows, as AAudio open/start 
+        // can be slow and we involve Thread.sleep for retries!
+        Thread {
+            // Safety: Ensure any previous session is stopped first
+            isRecording = false // Reset while we transition 
+            nativeAudioEngine?.stop()
+            
+            // Give the OS a moment to fully release the hardware resource
+            try {
+                Thread.sleep(150)
+            } catch (e: InterruptedException) {
+                // ignore
             }
             
-            attempts--
-            Log.w("AudioEngine", "Failed to start native audio engine: $result. Attempts remaining: $attempts")
-            if (attempts > 0) {
-                try {
-                    // Increased delay slightly to give more room for system transitions
-                    Thread.sleep(800)
-                } catch (e: InterruptedException) {
+            nativeAudioEngine?.setProfile(micProfile)
+            nativeAudioEngine?.setThreshold(noiseThreshold)
+            nativeAudioEngine?.setMuted(isMicMuted) // Apply current mute state
+            nativeAudioEngine?.setPlaybackActive(isPlaybackActive) // Apply current playback state
+            currentSeqID = System.currentTimeMillis()
+            
+            // Retry logic: opening the mic can fail if the audio system is busy or transitioning modes
+            var attempts = 3
+            while (attempts > 0) {
+                val result = nativeAudioEngine?.start() ?: -1
+                if (result == 0) {
+                    Log.d("AudioEngine", "Native audio engine started successfully.")
+                    isRecording = true
                     break
                 }
-            } else {
-                Log.e("AudioEngine", "Giving up on starting native audio engine after 3 attempts.")
+                
+                attempts--
+                Log.w("AudioEngine", "Failed to start native audio engine: $result. Attempts remaining: $attempts")
+                if (attempts > 0) {
+                    try {
+                        // Increased delay slightly to give more room for system transitions
+                        Thread.sleep(800)
+                    } catch (e: InterruptedException) {
+                        break
+                    }
+                } else {
+                    Log.e("AudioEngine", "Giving up on starting native audio engine after 3 attempts.")
+                }
             }
-        }
+        }.start()
     }
 
     fun stopRecording() {
         Log.d("AudioEngine", "Stopping recording (current profile=$micProfile)")
         isRecording = false
-        nativeAudioEngine?.stop()
+        // Stop on a background thread too, just to be safe and consistent 
+        Thread {
+            nativeAudioEngine?.stop()
+        }.start()
     }
 
     fun forceEndStreaming() {
@@ -160,14 +171,14 @@ class AudioEngine(
         nativeAudioEngine = null
     }
 
-    fun playAudioChunk(pcmData: ByteArray, pcmSampleRate: Int = 22050) {
+    fun playAudioChunk(pcmData: ByteArray, pcmSampleRate: Int = 22050, associatedText: String? = null) {
         // Calculate frames from bytes (16-bit Mono = 2 bytes per frame)
         // We subtract 44 bytes if it's a WAV header so we don't count metadata as audio
         val isWav = pcmData.size >= 44 && pcmData[0] == 'R'.code.toByte() && pcmData[1] == 'I'.code.toByte()
         val audioBytes = if (isWav) pcmData.size - 44 else pcmData.size
         totalAiFrames += audioBytes / 2
         
-        audioQueue.put(Pair(pcmData, pcmSampleRate)) // Instantly queues and returns, freeing the WebSocket thread!
+        audioQueue.put(Triple(pcmData, pcmSampleRate, associatedText)) // Instantly queues and returns, freeing the WebSocket thread!
 
         if (playbackThread == null || playbackThread?.isAlive != true) {
             playbackThread = Thread {
@@ -175,7 +186,7 @@ class AudioEngine(
                 while (!Thread.currentThread().isInterrupted) {
                     try {
                         val chunk = audioQueue.take()
-                        playChunkInternal(chunk.first, chunk.second)
+                        playChunkInternal(chunk.first, chunk.second, chunk.third)
                     } catch (e: InterruptedException) {
                         break
                     }
@@ -194,20 +205,37 @@ class AudioEngine(
                         val progress = if (totalAiFrames > 0) (1f - (currentFrame.toFloat() / totalAiFrames.toFloat())).coerceIn(0f, 1f) else 0f
                         onBufferProgress(progress)
 
-                        // Pull synced RMS from queue based on hardware playback head!
+                        // Pull synced data from queue based on hardware playback head!
                         var targetRms = -1f
+                        var targetBands = listOf<Float>()
                         var poppedAny = false
-                        while (rmsQueue.isNotEmpty() && rmsQueue.peek()!!.first <= currentFrame) {
-                            val popped = rmsQueue.poll()?.second ?: 0f
-                            if (popped > targetRms) targetRms = popped // Find max transient in this 16ms window
+                        while (audioDataQueue.isNotEmpty() && audioDataQueue.peek()!!.first <= currentFrame) {
+                            val popped = audioDataQueue.poll()!!
+                            if (popped.second > targetRms) {
+                                targetRms = popped.second // Find max transient in this 16ms window
+                                targetBands = popped.third
+                            }
                             poppedAny = true
                         }
                         if (poppedAny) {
-                            onAiVolumeChange(targetRms)
-                        } else if (rmsQueue.isEmpty() && currentFrame >= totalWrittenFrames) {
-                            if (totalAiFrames > 0) { // Only fire if we actually played something
-                                totalAiFrames = 0 // Resetting this acts as a latch so we only fire once per playback queue exhaustion
-                                onAiVolumeChange(0f) // Audio finished, drop to 0
+                            onAiDataChange(targetRms, targetBands)
+                        } 
+
+                        // 3. Hardware Text Reveal: Sync text to the exact playback frame
+                        while (textSyncQueue.isNotEmpty() && textSyncQueue.peek()!!.first <= currentFrame) {
+                            val text = textSyncQueue.poll()!!.second
+                            onTextPlayed(text)
+                        }
+
+                        if (audioDataQueue.isEmpty() && currentFrame >= totalWrittenFrames) {
+                            if (totalAiFrames > 0) { 
+                                // Hardware Drain: Wait for the buffer to actually reach the speaker
+                                try {
+                                    Thread.sleep(250)
+                                } catch (e: InterruptedException) { break }
+                                
+                                totalAiFrames = 0 
+                                onAiDataChange(0f, listOf(0f,0f,0f,0f,0f)) 
                                 onPlaybackComplete()
                             }
                         }
@@ -223,7 +251,11 @@ class AudioEngine(
         }
     }
 
-    private fun playChunkInternal(pcmData: ByteArray, chunkSampleRate: Int) {
+    private fun playChunkInternal(pcmData: ByteArray, chunkSampleRate: Int, associatedText: String?) {
+        if (associatedText != null) {
+            textSyncQueue.add(Pair(totalWrittenFrames, associatedText))
+        }
+
         // Check if the data has a standard 44-byte RIFF/WAVE header
         val isWav = pcmData.size >= 44 && pcmData[0] == 'R'.code.toByte() && pcmData[1] == 'I'.code.toByte()
         
@@ -240,9 +272,6 @@ class AudioEngine(
         // If the sample rate changed, or the track doesn't exist, (re)build it
         if (audioTrack == null || audioTrack?.sampleRate != trackSampleRate) {
             audioTrack?.release()
-            totalAiFrames = 0 // Reset total frames since the head position will restart at 0
-            totalWrittenFrames = 0
-            rmsQueue.clear()
             
             val minBufferSize = AudioTrack.getMinBufferSize(trackSampleRate, AudioFormat.CHANNEL_OUT_MONO, audioFormat)
             
@@ -303,7 +332,8 @@ class AudioEngine(
             if (written > 0) {
                 val chunkFrames = written / 2
                 val rms = if (chunkFrames > 0) sqrt(sum / chunkFrames).toFloat() else 0f
-                rmsQueue.add(Pair(totalWrittenFrames, rms)) // Queue RMS to its exact playback frame
+                val bands = FftHelper.calculateBands(pcmData, offset, bytesToWrite)
+                audioDataQueue.add(Triple(totalWrittenFrames, rms, bands)) // Queue data to its exact playback frame
                 offset += written
                 totalWrittenFrames += chunkFrames
             } else if (written < 0) {
@@ -322,6 +352,20 @@ class AudioEngine(
         // The playChunkInternal loop will automatically wake up and call .play()
     }
 
+    fun prepareForNewResponse() {
+        Log.d("AudioEngine", "Preparing for new AI response session. Resetting frames.")
+        totalAiFrames = 0
+        totalWrittenFrames = 0
+        audioDataQueue.clear()
+        textSyncQueue.clear()
+        audioTrack?.flush()
+        val track = audioTrack
+        if (track != null && track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+            // Already initialized, don't kill it but we need to reset head tracking if possible
+            // AudioTrack head doesn't reset easily without stop/start, but we'll manage with totalAiFrames as a latch
+        }
+    }
+
     fun abortPlayback() {
         isPausedLocally = false
         audioQueue.clear() // Drop all pending TTS chunks
@@ -330,19 +374,11 @@ class AudioEngine(
         playbackThread = null
         audioTrack?.pause()
         audioTrack?.flush()
-        totalAiFrames = 0
-        totalWrittenFrames = 0
-        rmsQueue.clear()
+        prepareForNewResponse()
+        
         onBufferProgress(0f)
-        onAiVolumeChange(0f)
+        onAiDataChange(0f, listOf(0f, 0f, 0f, 0f, 0f))
         progressThread?.interrupt()
         progressThread = null
-        // We don't release here so we can reuse the track for gapless streaming
-    }
-
-    fun prepareForNewStream() {
-        Log.d("AudioEngine", "Preparing for new audio stream (clearing RMS queue only)")
-        // We no longer reset totalAiFrames/totalWrittenFrames here to allow accumulation
-        // rmsQueue.clear() // Should we clear RMS queue? Yes, because we want it to stay synced with the track head if we're technically between chunks.
     }
 }

@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
 
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.clickable
 
@@ -95,15 +96,23 @@ fun MessageBubble(msg: UiMessage, index: Int, isRecent: Boolean, mainActivity: M
         Row(
             modifier = Modifier
                 .weight(1f)
+                .graphicsLayer { alpha = if (msg.isLive) 0.6f else 1.0f }
                 .clickable { userExpanded = !userExpanded }
         ) {
+            val prefix = if (isAi) "${SpeaxManager.assistantName}: " 
+                         else if (msg.isLive) "Hearing: "
+                         else if (!isSystem) "User: " 
+                         else "[System]: "
             Text(
-                text = if (isAi) "${SpeaxManager.assistantName}: ${msg.content}" else if (!isSystem) "User: ${msg.content}" else "[System]: ${msg.content}",
-                color = if (isSystem) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f) else if (isAi) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                text = "$prefix${msg.content}",
+                color = if (isSystem) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f) 
+                        else if (isAi) MaterialTheme.colorScheme.onSurface 
+                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 fontSize = if (isSystem) 12.sp else 16.sp,
                 fontWeight = if (isAi) FontWeight.Bold else FontWeight.Normal,
-                fontStyle = if (isSystem) androidx.compose.ui.text.font.FontStyle.Italic else androidx.compose.ui.text.font.FontStyle.Normal,
-                maxLines = if (shouldExpand) Int.MAX_VALUE else 1,
+                fontStyle = if (isSystem || msg.isLive) androidx.compose.ui.text.font.FontStyle.Italic 
+                            else androidx.compose.ui.text.font.FontStyle.Normal,
+                maxLines = if (shouldExpand || msg.isLive) Int.MAX_VALUE else 1,
                 overflow = TextOverflow.Ellipsis
             )
         }

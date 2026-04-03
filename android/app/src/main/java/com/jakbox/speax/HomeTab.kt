@@ -5,6 +5,14 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.animation.core.*
+import androidx.compose.ui.geometry.Offset
+import kotlin.math.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.border
@@ -29,13 +37,34 @@ import androidx.compose.ui.platform.LocalConfiguration
 
 @Composable
 fun HomeTab(mainActivity: MainActivity) {
-    val aiAnimatedIntensity = remember { mutableFloatStateOf(0f) }
+    val aiAnimatedBands = remember { mutableStateListOf(0f, 0f, 0f, 0f, 0f) }
+    val aiOverallIntensity = remember { mutableFloatStateOf(0f) }
+    val aiRotations = remember { mutableStateListOf(0f, 0f, 0f, 0f, 0f) }
+    
     LaunchedEffect(Unit) {
         while (true) {
             androidx.compose.runtime.withFrameNanos {
-                val target = if (mainActivity.isConnected && !mainActivity.isAiPaused) (mainActivity.aiRms / 6000f).coerceIn(0f, 1f) else 0f
-                val step = if (target > aiAnimatedIntensity.floatValue) 0.4f else 0.05f
-                aiAnimatedIntensity.floatValue += (target - aiAnimatedIntensity.floatValue) * step
+                val isActive = mainActivity.isConnected && !mainActivity.isAiPaused && (mainActivity.isGeneratingAi || mainActivity.playbackProgress > 0f)
+                val targets = if (isActive) mainActivity.aiBands else listOf(0f, 0f, 0f, 0f, 0f)
+                val rmsTarget = if (isActive) (mainActivity.aiRms / 6000f).coerceIn(0f, 1f) else 0f
+                
+                // Animate each band individually for the deformation
+                for (i in 0 until 5) {
+                    val target = targets.getOrElse(i) { 0f }
+                    val current = aiAnimatedBands[i]
+                    val step = if (target > current) 0.25f else 0.1f
+                    aiAnimatedBands[i] = current + (target - current) * step
+
+                    // Per-layer rotation speed linked to band intensity
+                    // Much lower base rate (0.02f) as requested
+                    val baseSpeed = 0.02f 
+                    val intensityBonus = aiAnimatedBands[i] * 0.8f
+                    aiRotations[i] = (aiRotations[i] + baseSpeed + intensityBonus)
+                }
+                
+                // Animate overall intensity for scaling the main button
+                val step = if (rmsTarget > aiOverallIntensity.floatValue) 0.4f else 0.05f
+                aiOverallIntensity.floatValue += (rmsTarget - aiOverallIntensity.floatValue) * step
             }
         }
     }
@@ -59,7 +88,7 @@ fun HomeTab(mainActivity: MainActivity) {
             contentAlignment = Alignment.Center
         ) {
             // AI Pulsing Glow
-            AiPulsingGlow({ aiAnimatedIntensity.floatValue }, modifier = Modifier.offset(y = -shiftAmount))
+            AiPulsingGlow(aiAnimatedBands, aiRotations, modifier = Modifier.offset(y = -shiftAmount))
 
             // Main Button
             FloatingActionButton(
@@ -69,7 +98,7 @@ fun HomeTab(mainActivity: MainActivity) {
                     .size(160.dp)
                     .offset(y = -shiftAmount)
                     .graphicsLayer {
-                        val scale = 1f + (aiAnimatedIntensity.floatValue * 0.15f)
+                        val scale = 1f + (aiOverallIntensity.floatValue * 0.15f)
                         scaleX = scale
                         scaleY = scale
                     },
@@ -141,28 +170,67 @@ fun HomeTab(mainActivity: MainActivity) {
 }
 
 @Composable
-fun AiPulsingGlow(intensityProvider: () -> Float, modifier: Modifier = Modifier) {
-    val baseColor = MaterialTheme.colorScheme.secondary
+fun AiPulsingGlow(bands: List<Float>, rotations: List<Float>, modifier: Modifier = Modifier) {
+    val theme = SpeaxManager.currentTheme
+    val baseColor = theme?.secondary?.let { Color(android.graphics.Color.parseColor(it)) } ?: MaterialTheme.colorScheme.secondary
+    
+    // Reducing to 5 layers as requested
+    val layers = listOf(
+        Triple(80.dp, 0.25f, 60f), // Bass - High scaling
+        Triple(80.dp, 0.4f, 50f),
+        Triple(80.dp, 0.55f, 40f),
+        Triple(80.dp, 0.7f, 30f),
+        Triple(80.dp, 0.85f, 20f)  // Highs - Low scaling
+    )
 
-    Canvas(
-        modifier = modifier
-            .size(200.dp) // Tighter outer bounds
-            .graphicsLayer {
-                val scale = 1f + (intensityProvider() * 0.15f)
-                scaleX = scale
-                scaleY = scale
+    Box(modifier = modifier.size(400.dp), contentAlignment = Alignment.Center) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val canvasCenter = Offset(size.width / 2f, size.height / 2f)
+            
+            layers.forEachIndexed { index, config ->
+                val (baseRadiusDp, alpha, deformMult) = config
+                val baseRadius = baseRadiusDp.toPx()
+                
+                val rotation = rotations.getOrElse(index) { 0f }
+                val intensity = bands.getOrElse(index) { 0f }
+                
+                // Subtle Orbital Drift Logic (max 8dp)
+                val driftAngle = Math.toRadians(rotation.toDouble() * 0.5).toFloat()
+                val driftDistance = (intensity * 8.dp.toPx())
+                val centerOffset = Offset(
+                    cos(driftAngle) * driftDistance,
+                    sin(driftAngle) * driftDistance
+                )
+                
+                val currentCenter = canvasCenter + centerOffset
+                val currentRadius = baseRadius + (intensity * deformMult.dp.toPx())
+                
+                // DYNAMIC Star-Burst Gradient: Scales with the intensity
+                // Original stop logic (0.0 -> 0.8) for solid core
+                val radialBrush = Brush.radialGradient(
+                    0.0f to baseColor.copy(alpha = alpha),
+                    0.8f to baseColor.copy(alpha = alpha * 0.8f),
+                    1.0f to Color.Transparent,
+                    center = currentCenter,
+                    radius = currentRadius.coerceAtLeast(1f)
+                )
+
+                // Back to drawCircle without deformation as requested
+                drawCircle(
+                    brush = radialBrush,
+                    center = currentCenter,
+                    radius = currentRadius
+                )
+                
+                // Edge stroke for crisp separation
+                drawCircle(
+                    color = baseColor.copy(alpha = alpha * 0.3f),
+                    center = currentCenter,
+                    radius = currentRadius,
+                    style = Stroke(width = 1.dp.toPx())
+                )
             }
-    ) {
-        val intensity = intensityProvider()
-        val glowColor = baseColor.copy(alpha = (0.8f * intensity).coerceIn(0f, 1f))
-        drawCircle(
-            brush = Brush.radialGradient(
-                0.0f to glowColor,
-                0.75f to glowColor, // Stay solid underneath the 160dp button (80 / 100 = 0.8)
-                1.0f to Color.Transparent,
-                radius = size.width / 2f
-            )
-        )
+        }
     }
 }
 
