@@ -945,11 +945,26 @@
         });
 
         client.registerAction('read_note', 'Reads a note by ID or title.', {
-            type: 'object', properties: { id: { type: 'string' } }, required: ['id']
+            type: 'object', 
+            properties: { 
+                id: { type: 'string' },
+                last_read: { type: 'integer', description: 'Unix timestamp of the last time this item was read.' }
+            }, 
+            required: ['id']
         }, async (a) => {
             const n = DB.getNotes().find(x => x.id === a.id || (x.title && x.title.toLowerCase().includes(a.id.toLowerCase())));
-            return n ? { success: true, note: n } : { success: false, error: 'Note not found' };
+            if (!n) return { success: false, error: 'Note not found' };
+
+            if (a.last_read && n.updatedAt) {
+                const updatedSecs = Math.floor(new Date(n.updatedAt).getTime() / 1000);
+                if (updatedSecs <= a.last_read) {
+                    return "[NOT_MODIFIED]";
+                }
+            }
+
+            return { success: true, note: n };
         });
+
 
         client.registerAction('update_note', 'Updates a note by ID or title.', {
             type: 'object', 

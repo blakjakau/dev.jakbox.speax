@@ -521,13 +521,27 @@
         });
 
         toolClient.registerAction('read_scratch', 'Read the content of a specific scratch item.', {
-            type: 'object', properties: { id: { type: 'string' } }, required: ['id']
+            type: 'object', 
+            properties: { 
+                id: { type: 'string' },
+                last_read: { type: 'integer', description: 'Unix timestamp of the last time this item was read.' }
+            }, 
+            required: ['id']
         }, async (p) => {
             const item = getItems().find(i => i.id === p.id);
             if (!item) throw new Error("Item not found");
+
+            if (p.last_read && item.updated) {
+                const updatedSecs = Math.floor(new Date(item.updated).getTime() / 1000);
+                if (updatedSecs <= p.last_read) {
+                    return "[NOT_MODIFIED]";
+                }
+            }
+
             renderItem(item);
             return item;
         });
+
 
         toolClient.registerAction('create_scratch', 'Create a new scratch item.', {
             type: 'object', 

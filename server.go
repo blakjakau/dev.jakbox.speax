@@ -46,6 +46,16 @@ func sanitizeFunctionName(s string) string {
 	return reg.ReplaceAllString(s, "_")
 }
 
+func getSortedKeys(m map[string]*Tool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+
 type FallbackLLMConfig struct {
 	URL    string   `json:"URL"`
 	Models []string `json:"Models"`
@@ -86,6 +96,7 @@ type Config struct {
 	WhisperMinBuffer      float64                   `json:"WhisperMinBuffer"`
 	WhisperMaxBuffer      float64                   `json:"WhisperMaxBuffer"`
 	WhisperEnergyThreshold float64                  `json:"WhisperEnergyThreshold"`
+	VerboseLogging         bool                     `json:"VerboseLogging"`
 }
 
 type ModelRateLimit struct {
@@ -645,16 +656,32 @@ type ChatMessage struct {
 	ToolResult *NativeToolResult `json:"tool_result,omitempty"`
 }
 
-type Thread struct {
-	ID          string        `json:"id"`
-	Name        string        `json:"name"`
-	History     []ChatMessage `json:"history"`
-	Archive     []ChatMessage `json:"archive"`
-	Summary     string        `json:"summary"`
-	ToolHistory []ChatMessage `json:"-"` // Stored separately in system_[name].json
-	CreatedAt   time.Time     `json:"createdAt"`
-	UpdatedAt   time.Time     `json:"updatedAt"`
+type PinnedItemHeader struct {
+	Source      string `json:"source"`
+	Identifier  string `json:"identifier"`
+	Name        string `json:"name"`
+	ReadCommand string `json:"read_command"`
+	Status      string `json:"status"`    // ONLINE/OFFLINE
+	LastRead    int64  `json:"last_read"` // Unix timestamp (seconds)
 }
+
+type PinnedItem struct {
+	Header  PinnedItemHeader `json:"header"`
+	Content string           `json:"content"` // Raw content or null/missing
+}
+
+type Thread struct {
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name"`
+	History     []ChatMessage          `json:"history"`
+	Archive     []ChatMessage          `json:"archive"`
+	Summary     string                 `json:"summary"`
+	ToolHistory []ChatMessage          `json:"-"` // Stored separately in system-[...].json
+	PinnedItems map[string]*PinnedItem `json:"-"` // Stored separately in pinned-[...].json
+	CreatedAt   time.Time              `json:"createdAt"`
+	UpdatedAt   time.Time              `json:"updatedAt"`
+}
+
 
 
 
@@ -1341,6 +1368,26 @@ func sanitizeTitle(title string) string {
 	return sanitized
 }
 
+func getUniqueThreadName(threads map[string]*Thread, name string, currentID string) string {
+	baseName := name
+	counter := 1
+	for {
+		found := false
+		for id, t := range threads {
+			if id != currentID && t.Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return name
+		}
+		name = fmt.Sprintf("%s (%d)", baseName, counter)
+		counter++
+	}
+}
+
+
 func loadSession(clientID string) *ClientSession {
 	session := &ClientSession{ClientID: clientID, Threads: make(map[string]*Thread)}
 
@@ -1390,7 +1437,22 @@ func loadSession(clientID string) *ClientSession {
 					if t.ToolHistory == nil {
 						t.ToolHistory = []ChatMessage{}
 					}
+
+					// Try to load per-thread pinned items from matching pinned-... file
+					pinnedFileName := "pinned-" + strings.TrimPrefix(entry.Name(), "chat-")
+					pinnedData, err := os.ReadFile(filepath.Join(dir, pinnedFileName))
+					if err == nil {
+						var pinnedItems map[string]*PinnedItem
+						if json.Unmarshal(pinnedData, &pinnedItems) == nil {
+							t.PinnedItems = pinnedItems
+						}
+					}
+					if t.PinnedItems == nil {
+						t.PinnedItems = make(map[string]*PinnedItem)
+					}
+
 					session.Threads[t.ID] = &t
+
 				}
 			}
 		}
@@ -1405,9 +1467,11 @@ func loadSession(clientID string) *ClientSession {
 			ID: "default", Name: "General Chat",
 			History: session.History, Archive: session.Archive, Summary: session.Summary,
 			ToolHistory: []ChatMessage{},
+			PinnedItems: make(map[string]*PinnedItem),
 			CreatedAt:   time.Now(),
 			UpdatedAt:   time.Now(),
 		}
+
 
 
 		session.Threads["default"] = t
@@ -1422,7 +1486,11 @@ func loadSession(clientID string) *ClientSession {
 		if t.ToolHistory == nil {
 			t.ToolHistory = []ChatMessage{}
 		}
+		if t.PinnedItems == nil {
+			t.PinnedItems = make(map[string]*PinnedItem)
+		}
 	}
+
 	if session.SystemLog == nil {
 		session.SystemLog = []ChatMessage{}
 	}
@@ -1589,13 +1657,16 @@ func saveSession(session *ClientSession) {
 		}
 		activeFiles[relPath] = true
 
-		// Save tool history separately; omit field when serializing chat
+		// Save tool history and pinned items separately; omit fields when serializing chat
 		originalToolHistory := t.ToolHistory
+		originalPinnedItems := t.PinnedItems
 		t.ToolHistory = nil
+		t.PinnedItems = nil
 		if data, err := json.MarshalIndent(t, "", "  "); err == nil {
 			os.WriteFile(chatPath, data, 0644)
 		}
 		t.ToolHistory = originalToolHistory
+		t.PinnedItems = originalPinnedItems
 
 		// Handle system history file
 		sysPath := strings.Replace(chatPath, "chat-", "system-", 1)
@@ -1613,6 +1684,24 @@ func saveSession(session *ClientSession) {
 		} else {
 			os.Remove(sysPath)
 		}
+
+		// Handle pinned items file
+		pinnedPath := strings.Replace(chatPath, "chat-", "pinned-", 1)
+		pinnedFileName := filepath.Base(pinnedPath)
+		pinnedRelPath := pinnedFileName
+		if strings.HasPrefix(shortID, "assistant/") {
+			pinnedRelPath = filepath.Join("assistant", pinnedFileName)
+		}
+
+		if len(originalPinnedItems) > 0 {
+			activeFiles[pinnedRelPath] = true
+			if pinnedData, err := json.MarshalIndent(originalPinnedItems, "", "  "); err == nil {
+				os.WriteFile(pinnedPath, pinnedData, 0644)
+			}
+		} else {
+			os.Remove(pinnedPath)
+		}
+
 	}
 
 	// Temporarily hide Threads and SystemLog to marshal only config cleanly
@@ -2313,12 +2402,39 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 						resultDetails["error"] = result.Error
 					} else {
 						resultDetails["data"] = result.Data
+						// Handle Pinned Item Data Update
+						if strings.HasPrefix(result.ExecutionId, "pin_update:") {
+							parts := strings.Split(result.ExecutionId, ":")
+							if len(parts) >= 3 {
+								targetId := parts[1]
+								for _, item := range t.PinnedItems {
+									if item.Header.Identifier == targetId && item.Header.Source == result.ToolName {
+										if result.Data != "[NOT_MODIFIED]" {
+											contentBytes, _ := json.Marshal(result.Data)
+											item.Content = string(contentBytes)
+											item.Header.LastRead = time.Now().Unix()
+										}
+										break
+									}
+								}
+							}
+						}
+
 					}
 					resultJson, _ := json.Marshal(resultDetails)
 					nativeName := fmt.Sprintf("%s_%s", result.ToolName, result.ActionName)
 					session.appendNativeToolResult(nativeName, string(resultJson), t, result.ExecutionId)
 					session.Mutex.Unlock()
 					saveSession(session)
+
+					// Trigger async update for ALL pinned items from this source tool
+					// to ensure any changes made by the previous tool action are reflected.
+					// AVOID RECURSION: Do not trigger update IF the result itself was an update.
+					if !strings.HasPrefix(result.ExecutionId, "pin_update:") {
+						go asyncUpdatePinnedItems(session, result.ToolName)
+					}
+
+
 
 					// Auto-trigger the AI to analyze the result and respond (DEBOUNCED)
 					session.Mutex.Lock()
@@ -2382,7 +2498,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				}
 				id := fmt.Sprintf("%d", time.Now().UnixNano())
 				session.Mutex.Lock()
-				session.Threads[id] = &Thread{ID: id, Name: name}
+				name = getUniqueThreadName(session.Threads, name, id)
+				session.Threads[id] = &Thread{ID: id, Name: name, PinnedItems: make(map[string]*PinnedItem)}
 				session.ActiveThreadID = id
 				session.Mutex.Unlock()
 				saveSession(session)
@@ -2391,6 +2508,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				sendSummary(nil, session)
 				continue
 			}
+
 
 			if strings.HasPrefix(text, "[SWITCH_THREAD]:") {
 				id := strings.TrimPrefix(text, "[SWITCH_THREAD]:")
@@ -2414,13 +2532,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				name := strings.TrimPrefix(text, "[RENAME_THREAD]:")
 				session.Mutex.Lock()
 				if t := session.ActiveThread(); t != nil {
-					t.Name = name
+					t.Name = getUniqueThreadName(session.Threads, name, t.ID)
 				}
 				session.Mutex.Unlock()
 				saveSession(session)
 				sendThreads(nil, session)
 				continue
 			}
+
 
 			if strings.HasPrefix(text, "[DELETE_THREAD]:") {
 				id := strings.TrimPrefix(text, "[DELETE_THREAD]:")
@@ -2652,7 +2771,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 								return
 							}
 
-							log.Printf("[LLM] Processing text prompt: '%s' (isTyped=%v, Start=%v)", p, isTyped, bt.Format("15:04:05.000"))
+							log.Printf("[LLM] Processing text prompt (%d words): '%s' (isTyped=%v, Start=%v)", len(strings.Fields(p)), formatTranscriptSummary(p), isTyped, bt.Format("15:04:05.000"))
 							if err := streamLLMAndTTS(ctx, p, ws, session); err != nil {
 								log.Println("LLM stream error:", err)
 							}
@@ -2827,6 +2946,22 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func formatTranscriptSummary(text string) string {
+	configMutex.RLock()
+	verbose := config.VerboseLogging
+	configMutex.RUnlock()
+	if verbose {
+		return text
+	}
+
+	words := strings.Fields(text)
+	wordCount := len(words)
+	if wordCount <= 10 {
+		return text
+	}
+	return strings.Join(words[:5], " ") + " ... " + strings.Join(words[wordCount-5:], " ")
+}
+
 func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) {
 	// Protocol: [0xFF][TYPE][SEQ_ID (8 bytes)][DATA]
 	packetType := p[1]
@@ -2852,6 +2987,7 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 				pinnedURL = pinned.URL
 			}
 
+			var loggedInitial bool
 			stream = &stt.StreamSession{
 				Manager:         sttManager,
 				PinnedURL:       pinnedURL,
@@ -2861,7 +2997,13 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 				MaxBufferSecs:   config.WhisperMaxBuffer,
 				EnergyThreshold: config.WhisperEnergyThreshold,
 				OnUpdate: func(fullTranscript string) {
-					log.Printf("[STT-Live] %d: %s", seqID, fullTranscript)
+					if !loggedInitial && fullTranscript != "" {
+						words := strings.Fields(fullTranscript)
+						if len(words) > 0 {
+							log.Printf("[STT-Live] %d: %s...", seqID, formatTranscriptSummary(fullTranscript))
+							loggedInitial = true
+						}
+					}
 					targetWebClients(session, []byte("[STT_LIVE]:"+fullTranscript))
 
 					// Barge-In Trigger: If meaningful words detected, stop any active AI response
@@ -2871,7 +3013,7 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 						session.Mutex.Unlock()
 
 						if activeCancel != nil {
-							log.Printf("[Barge-In] Substantial words detected: '%s'. Interrupting AI.", fullTranscript)
+							log.Printf("[Barge-In] Substantial words detected (seq %d). Interrupting AI.", seqID)
 							// 1. Tell client to stop audio hardware
 							safeWrite(ws, session, websocket.TextMessage, []byte("[STOP_AUDIO]"))
 							// 2. Kill LLM/TTS generation
@@ -2894,7 +3036,11 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 			// Final synchronous wrap-up to ensure the tail is processed
 			fullTranscript := stream.Finish()
 			
-			log.Printf("[STT-Stream-v1] Finalizing sequence %d (Full): %s", seqID, fullTranscript)
+			log.Printf("[STT-Stream-v1] Finalizing sequence %d", seqID)
+			
+			// Use the format: "[STT-Live] Final Transcription (35 words transcribed) sequence %d: 'initial ... last'"
+			wordCount := len(strings.Fields(fullTranscript))
+			log.Printf("[STT-Live] Final Transcription (%d words transcribed) sequence %d: '%s'", wordCount, seqID, formatTranscriptSummary(fullTranscript))
 			
 			// Clean up
 			delete(session.STTStreams, int64(seqID))
@@ -2932,6 +3078,7 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 					safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
 					return
 				}
+				log.Printf("[STT-Legacy] Final Transcription (%d words transcribed) sequence %d: '%s'", len(strings.Fields(text)), seqID, formatTranscriptSummary(text))
 				processStreamingWhisper(ws, session, text)
 			}(fullBuffer)
 		}
@@ -2939,8 +3086,6 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 }
 
 func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, text string) {
-	log.Printf("[STT-Stream] Processing Final Transcript: '%s'", text)
-
 	if text == "" {
 		log.Println("[STT-Stream] Empty final transcript, ignoring.")
 		return
@@ -3026,7 +3171,38 @@ func getInternalTools() []Tool {
 				},
 			},
 		},
+		{
+			Name: "ContextManager",
+			Actions: []ToolAction{
+				{
+					Name:        "pin_item",
+					Description: "Pin a data item (note, scratchpad, etc) to the persistent context. This ensures the item is always visible and up-to-date in your context.",
+					Schema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"source":       map[string]interface{}{"type": "string", "description": "The tool name (e.g. 'NotesManager', 'ScratchPad')"},
+							"identifier":   map[string]interface{}{"type": "string", "description": "Unique ID of the item from the tool"},
+							"name":         map[string]interface{}{"type": "string", "description": "User friendly name for the pinned item"},
+							"read_command": map[string]interface{}{"type": "string", "description": "The command used to read the item (e.g. 'read_note', 'read_item')"},
+						},
+						"required": []string{"source", "identifier", "name", "read_command"},
+					},
+				},
+				{
+					Name:        "unpin_item",
+					Description: "Remove an item from the pinned context.",
+					Schema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"identifier": map[string]interface{}{"type": "string", "description": "The identifier of the item to unpin"},
+						},
+						"required": []string{"identifier"},
+					},
+				},
+			},
+		},
 	}
+
 }
 
 func getNativeToolsGemini(session *ClientSession) []interface{} {
@@ -3159,6 +3335,79 @@ func executeNativeToolCall(session *ClientSession, nativeName string, args map[s
 		sendSettings(nil, session)
 		return // DO NOT trigger ToolDebounceTimer (suppress LLM)
 	}
+
+	if toolName == "ContextManager" || sanitizeFunctionName("ContextManager") == toolName {
+		session.Mutex.Lock()
+		t := session.ActiveThread()
+		id := session.appendNativeToolCall(nativeName, args, t)
+		result := ""
+
+		if actionName == "pin_item" {
+			source := fmt.Sprintf("%v", args["source"])
+			identifier := fmt.Sprintf("%v", args["identifier"])
+			name := fmt.Sprintf("%v", args["name"])
+			readCommand := fmt.Sprintf("%v", args["read_command"])
+
+			if t.PinnedItems == nil {
+				t.PinnedItems = make(map[string]*PinnedItem)
+			}
+
+			// Robust tool lookup for pin source
+			actualSource := source
+			for toolKey := range session.Tools {
+				if toolKey == source || sanitizeFunctionName(toolKey) == source {
+					actualSource = toolKey
+					break
+				}
+			}
+
+			item := &PinnedItem{
+				Header: PinnedItemHeader{
+					Source:      actualSource,
+					Identifier:  identifier,
+					Name:        name,
+					ReadCommand: readCommand,
+					Status:      "OFFLINE",
+					LastRead:    0,
+				},
+				Content: "[NULL]",
+			}
+			t.PinnedItems[identifier] = item
+			result = fmt.Sprintf("{\"status\": \"success\", \"message\": \"Item '%s' (%s) pinned to context. It will be updated automatically.\"}", name, identifier)
+
+			// Trigger immediate update
+			go asyncUpdatePinnedItems(session, actualSource)
+
+		} else if actionName == "unpin_item" {
+			identifier := fmt.Sprintf("%v", args["identifier"])
+			if _, ok := t.PinnedItems[identifier]; ok {
+				delete(t.PinnedItems, identifier)
+				result = fmt.Sprintf("{\"status\": \"success\", \"message\": \"Item '%s' removed from pinned context.\"}", identifier)
+			} else {
+				result = fmt.Sprintf("{\"status\": \"error\", \"message\": \"Item '%s' not found in pinned context.\"}", identifier)
+			}
+		}
+
+		session.appendNativeToolResult(nativeName, result, t, id)
+		session.Mutex.Unlock()
+		saveSession(session)
+
+		// Trigger auto-resume for ContextManager actions
+		session.Mutex.Lock()
+		if session.ToolDebounceTimer != nil {
+			session.ToolDebounceTimer.Stop()
+		}
+		session.ToolDebounceTimer = time.AfterFunc(1*time.Second, func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			session.Mutex.Lock()
+			session.ActiveCancel = cancel
+			session.Mutex.Unlock()
+			streamLLMAndTTS(ctx, "[SYSTEM: Pinned context updated.]", nil, session)
+		})
+		session.Mutex.Unlock()
+		return
+	}
+
 
 	if toolName == "LongTermMemory" || sanitizeFunctionName("LongTermMemory") == toolName {
 		var err error
@@ -3547,7 +3796,15 @@ func prepareSystemPrompt(session *ClientSession, model, voiceName, provider stri
 		sysContent += getSystemStatusPrompt(session, provider)
 	}
 
-	// 5. Long-term Memory
+	// 6. Pinned Context Instructions
+	sysContent += "\n\n### Pinned Context Management\n"
+	sysContent += "You have the ability to 'pin' items (like specific notes or scratchpad entries) to your active context. "
+	sysContent += "Pinned items are injected into your context window automatically, providing deterministic state awareness and allowing you to track changes in real-time. "
+	sysContent += "Use `ContextManager:pin_item` to pin an item and `ContextManager:unpin_item` to remove it. "
+	sysContent += "When an item is pinned, it appears in your history with a `[PINNED_ITEM_HEADER]` block. "
+	sysContent += "Status `ONLINE` implies the source tool is connected; `OFFLINE` means the tool is disconnected and content may be hidden or stale."
+
+	// 7. Long-term Memory
 	if memoryMap := loadLongTermMemory(session.ClientID); len(memoryMap) > 0 {
 		sysContent += "\n### Long-term Memory\n"
 		for k, v := range memoryMap {
@@ -3598,6 +3855,116 @@ func saveCalculatedContentWindow(session *ClientSession, body []byte) {
 	windowPath := filepath.Join(getContextDir(session.ClientID), "calculated-content-window.json")
 	os.WriteFile(windowPath, body, 0644)
 }
+
+
+func mergePinnedItemsIntoContext(session *ClientSession, msgs []ChatMessage) []ChatMessage {
+	t := session.ActiveThread()
+	if t == nil || len(t.PinnedItems) == 0 {
+		return msgs
+	}
+
+
+	// Verify tool online status
+	var pinnedOut []string
+	for _, item := range t.PinnedItems {
+		sourceTool := item.Header.Source
+		status := "OFFLINE"
+		// Robust lookup check
+		targetFound := false
+		if _, ok := session.Tools[sourceTool]; ok {
+			targetFound = true
+		} else {
+			for toolKey := range session.Tools {
+				if sanitizeFunctionName(toolKey) == sourceTool {
+					targetFound = true
+					break
+				}
+			}
+		}
+
+		if targetFound {
+			status = "ONLINE"
+		} else {
+			log.Printf("[PIN] Tool '%s' not found for pinned item '%s'. Available tools: %v", sourceTool, item.Header.Name, getSortedKeys(session.Tools))
+		}
+		item.Header.Status = status
+
+
+		content := item.Content
+		if status == "OFFLINE" {
+			content = "[NULL]"
+		}
+
+		headerJSON, _ := json.MarshalIndent(item.Header, "", "  ")
+		block := fmt.Sprintf("[PINNED_ITEM_HEADER]\n%s\n[END_HEADER]\n\n%s", string(headerJSON), content)
+
+		pinnedOut = append(pinnedOut, block)
+	}
+
+
+	if len(pinnedOut) == 0 {
+		return msgs
+	}
+
+	pinnedMsg := ChatMessage{
+		Role:      "user",
+		Content:   "[SYSTEM_DATA]: The following items are PINNED to the current context:\n\n" + strings.Join(pinnedOut, "\n\n---\n\n"),
+		Timestamp: time.Now(),
+	}
+
+	if len(msgs) == 0 {
+		return []ChatMessage{pinnedMsg}
+	}
+	if len(msgs) == 1 {
+		return []ChatMessage{pinnedMsg, msgs[0]}
+	}
+
+	// Inject at end -1
+	idx := len(msgs) - 1
+	result := make([]ChatMessage, 0, len(msgs)+1)
+	result = append(result, msgs[:idx]...)
+	result = append(result, pinnedMsg)
+	result = append(result, msgs[idx:]...)
+	return result
+}
+
+func asyncUpdatePinnedItems(session *ClientSession, toolName string) {
+	session.Mutex.Lock()
+	t := session.ActiveThread()
+	if t == nil || len(t.PinnedItems) == 0 {
+		session.Mutex.Unlock()
+		return
+	}
+
+	var targets []*PinnedItem
+	for _, item := range t.PinnedItems {
+		if item.Header.Source == toolName || sanitizeFunctionName(item.Header.Source) == toolName || item.Header.Source == sanitizeFunctionName(toolName) {
+			targets = append(targets, item)
+		}
+	}
+
+	session.Mutex.Unlock()
+
+	for _, item := range targets {
+		executionID := fmt.Sprintf("pin_update:%s:%s", item.Header.Identifier, generateID())
+		payload := map[string]interface{}{
+			"executionId": executionID,
+			"actionName":  item.Header.ReadCommand,
+			"params": map[string]interface{}{
+				"id":        item.Header.Identifier,
+				"last_read": item.Header.LastRead,
+			},
+		}
+		data, _ := json.Marshal(payload)
+		session.Mutex.Lock()
+		if tool, ok := session.Tools[toolName]; ok {
+			safeWrite(tool.Conn, session, websocket.TextMessage, []byte("[TOOL_EXECUTE]"+string(data)))
+		}
+		session.Mutex.Unlock()
+	}
+}
+
+
 
 func prepareLLMHistory(msgs []ChatMessage, provider string) []ChatMessage {
 	var finalMsgs []ChatMessage
@@ -3708,12 +4075,15 @@ func streamLLMAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, ses
 		if session.IsAssistant && !strings.HasPrefix(t.ID, "assistant/") {
 			newID := "assistant/chat_" + generateID()
 			log.Printf("[Assistant] Creating new assistant thread: %s (Topic: %s)", newID, topic)
+			uniqueTopic := getUniqueThreadName(session.Threads, topic, newID)
 			session.Threads[newID] = &Thread{
-				ID:        newID,
-				Name:      topic,
-				CreatedAt: time.Now(),
-				UpdatedAt: time.Now(),
+				ID:          newID,
+				Name:        uniqueTopic,
+				PinnedItems: make(map[string]*PinnedItem),
+				CreatedAt:   time.Now(),
+				UpdatedAt:   time.Now(),
 			}
+
 			session.ActiveThreadID = newID
 			shouldSync = true
 		}
@@ -3899,8 +4269,14 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	isToolModel := strings.Contains(strings.ToLower(model), "gemini") &&
 		!strings.Contains(strings.ToLower(model), "gemma") &&
 		!strings.Contains(strings.ToLower(model), "llama")
+	log.Printf("[LLM] Preparing context (isToolModel: %v)...", isToolModel)
 	contextMsgs := session.getLLMContext(t, isToolModel)
+	log.Printf("[LLM] Merging pinned items (count: %d)...", len(t.PinnedItems))
+	contextMsgs = mergePinnedItemsIntoContext(session, contextMsgs)
+	log.Printf("[LLM] Formatting history (turns: %d)...", len(contextMsgs))
 	formattedHistory := prepareLLMHistory(contextMsgs, "gemini")
+	log.Printf("[LLM] Submitting to Gemini API...")
+
 
 	type Part struct {
 		Text             string                 `json:"text,omitempty"`
@@ -4389,8 +4765,14 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 
 	t := session.ActiveThread()
 	ollamaSupportsTools := ollamaModelSupportsTools(model)
+	log.Printf("[LLM] Preparing context (Ollama Tool Support: %v)...", ollamaSupportsTools)
 	contextMsgs := session.getLLMContext(t, ollamaSupportsTools)
+	log.Printf("[LLM] Merging pinned items (count: %d)...", len(t.PinnedItems))
+	contextMsgs = mergePinnedItemsIntoContext(session, contextMsgs)
+	log.Printf("[LLM] Formatting history (turns: %d)...", len(contextMsgs))
 	formattedHistory := prepareLLMHistory(contextMsgs, "ollama")
+	log.Printf("[LLM] Submitting to Ollama API model: %s...", model)
+
 
 	var ollamaMsgs []map[string]interface{}
 	ollamaMsgs = append(ollamaMsgs, map[string]interface{}{
@@ -5132,7 +5514,7 @@ func queryTTS(text string, voice string, userName string, personaName string, ph
 		}
 	}
 
-	log.Printf("[TTS] Generating audio for text: '%s' with voice: %s (resolved from %s)", text, voiceFile, voice)
+	log.Printf("[TTS] Generating audio for text (%d words): '%s' with voice: %s (resolved from %s)", len(strings.Fields(text)), formatTranscriptSummary(text), voiceFile, voice)
 	// Execute piper binary: -f - tells it to output the WAV file directly to standard output
 	configMutex.RLock()
 	piperBin := config.PiperBin
