@@ -48,6 +48,8 @@ class AudioEngine(
     private val audioDataQueue = java.util.concurrent.ConcurrentLinkedQueue<Triple<Int, Float, List<Float>>>()
     private val textSyncQueue = java.util.concurrent.ConcurrentLinkedQueue<Pair<Int, String>>()
     private var currentSeqID = 0L
+    var lastPlayedTag: String? = null
+    var skipVadInterruption: Boolean = false
 
     var noiseThreshold = 255.0
         set(value) {
@@ -71,8 +73,12 @@ class AudioEngine(
         nativeAudioEngine = NativeAudioEngine(
             onSpeechStart = {
                 if (!isMicMuted) {
-                    Log.d("AudioEngine", "Speech detected! Suspending playback instantly.")
-                    suspendPlayback()
+                    if (!skipVadInterruption) {
+                        Log.d("AudioEngine", "Speech detected! Suspending playback instantly (Legacy VAD).")
+                        suspendPlayback()
+                    } else {
+                        Log.d("AudioEngine", "Speech detected! Playback continues (v1 Barge-in enabled).")
+                    }
                     onSpeechStart()
                 }
             },
@@ -224,6 +230,7 @@ class AudioEngine(
                         // 3. Hardware Text Reveal: Sync text to the exact playback frame
                         while (textSyncQueue.isNotEmpty() && textSyncQueue.peek()!!.first <= currentFrame) {
                             val text = textSyncQueue.poll()!!.second
+                            lastPlayedTag = text
                             onTextPlayed(text)
                         }
 
@@ -366,16 +373,35 @@ class AudioEngine(
         }
     }
 
-    fun abortPlayback() {
+    /**
+     * Immediately stops audio playback, flushes buffers, and returns the last played sentence tag.
+     */
+    fun stopAndFlush(): String? {
+        val lastTag = lastPlayedTag
         isPausedLocally = false
-        audioQueue.clear() // Drop all pending TTS chunks
+        audioQueue.clear() 
         // KILL the playback thread so it instantly drops the CURRENT chunk!
         playbackThread?.interrupt()
         playbackThread = null
-        audioTrack?.pause()
-        audioTrack?.flush()
-        prepareForNewResponse()
         
+        try {
+            audioTrack?.let { 
+                if (it.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                    it.stop()
+                }
+                it.flush()
+            }
+        } catch (e: Exception) {
+            Log.e("AudioEngine", "Error flushing AudioTrack: ${e.message}")
+        }
+        
+        prepareForNewResponse()
+        lastPlayedTag = null
+        return lastTag
+    }
+
+    fun abortPlayback() {
+        stopAndFlush()
         onBufferProgress(0f)
         onAiDataChange(0f, listOf(0f, 0f, 0f, 0f, 0f))
         progressThread?.interrupt()

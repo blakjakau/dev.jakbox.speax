@@ -34,23 +34,24 @@
             position: absolute;
             left: 0;
             top: 0;
+            transform: translateX(-100%);
+        }
+
+        .sidebar.open {
             transform: translateX(0);
+        }
+
+        .sidebar-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 999;
         }
 
         @media (max-width: 768px) {
             .sidebar {
-                transform: translateX(-100%);
                 box-shadow: 10px 0 30px rgba(0,0,0,0.5);
-            }
-            .sidebar.open {
-                transform: translateX(0);
-            }
-            .sidebar-overlay {
-                display: none;
-                position: fixed;
-                inset: 0;
-                background: rgba(0,0,0,0.5);
-                z-index: 999;
             }
             .sidebar-overlay.visible {
                 display: block;
@@ -177,15 +178,19 @@
         .view-area {
             flex: 1;
             height: 100%;
-            margin-left: var(--sidebar-width);
+            margin-left: 0;
             position: relative;
             background: var(--background);
             transition: margin-left var(--sidebar-transition);
             overflow: hidden;
         }
 
+        body.sidebar-open .view-area {
+            margin-left: var(--sidebar-width);
+        }
+
         @media (max-width: 768px) {
-            .view-area {
+            body.sidebar-open .view-area {
                 margin-left: 0;
             }
         }
@@ -200,19 +205,14 @@
         }
 
         #menu-toggle {
-            display: none;
+            display: flex;
             padding: 8px;
             background: var(--surface);
             border: 1px solid var(--outline);
             border-radius: 8px;
             cursor: pointer;
             box-shadow: 0 4px 10px rgba(0,0,0,0.3);
-        }
-
-        @media (max-width: 768px) {
-            #menu-toggle {
-                display: flex;
-            }
+            z-index: 1100;
         }
 
         .active-item-controls {
@@ -234,6 +234,7 @@
             padding: 20px;
             box-sizing: border-box;
             touch-action: none;
+            background: #1e293b;
         }
 
         .render-container {
@@ -246,6 +247,7 @@
             flex-direction: column;
             position: relative;
             transform-origin: center center;
+            transition: background 0.3s;
         }
 
         /* Specific Type Styles */
@@ -278,6 +280,9 @@
             align-items: center;
             justify-content: center;
             margin: auto;
+            padding: 40px;
+            min-width: 300px;
+            min-height: 300px;
         }
 
         .render-svg svg, .render-image img {
@@ -631,6 +636,7 @@
                 translateY = 0;
             }
             gesturesEnabled = (item.type === 'svg' || item.type === 'image_url');
+            renderContainer.classList.toggle('visual-mode', gesturesEnabled);
             
             renderContainer.style.transition = 'none';
             // Only apply initial transform if we reset or if it's new
@@ -725,11 +731,18 @@
         function closeSidebar() {
             sidebar.classList.remove('open');
             overlay.classList.remove('visible');
+            document.body.classList.remove('sidebar-open');
         }
 
         function openSidebar() {
             sidebar.classList.add('open');
             overlay.classList.add('visible');
+            document.body.classList.add('sidebar-open');
+        }
+
+        function toggleSidebar() {
+            if (sidebar.classList.contains('open')) closeSidebar();
+            else openSidebar();
         }
 
         // --- Pinch-Zoom & Pan Implementation ---
@@ -913,7 +926,15 @@
 
         scratchSearch.oninput = () => updateItemList();
         newItemBtn.onclick = () => openEditor();
-        menuToggle.onclick = () => openSidebar();
+        menuToggle.onclick = (e) => {
+            e.stopPropagation();
+            toggleSidebar();
+        };
+
+        // Initialize state
+        if (window.innerWidth > 768) {
+            openSidebar();
+        }
         overlay.onclick = () => closeSidebar();
 
         editBtn.onclick = () => {

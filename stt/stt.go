@@ -98,13 +98,42 @@ func (m *Manager) PickNode() (*Node, error) {
 	return nil, fmt.Errorf("all STT nodes are unhealthy")
 }
 
-func (m *Manager) getHealthyNode() (*Node, error) {
+func (m *Manager) getHealthyNode(pool ...[]string) (*Node, error) {
+	if len(pool) > 0 && len(pool[0]) > 0 {
+		return m.PickNodeFromPool(pool[0])
+	}
 	return m.PickNode()
 }
 
+// PickNodeFromPool returns a healthy node from the provided set of URLs.
+func (m *Manager) PickNodeFromPool(pool []string) (*Node, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var subset []*Node
+	for _, url := range pool {
+		for _, n := range m.nodes {
+			if n.URL == url {
+				if !n.Zombie {
+					subset = append(subset, n)
+				}
+				break
+			}
+		}
+	}
+
+	if len(subset) == 0 {
+		return nil, fmt.Errorf("no healthy STT nodes available in the specified pool")
+	}
+
+	idx := atomic.AddUint32(&m.index, 1) - 1
+	return subset[idx%uint32(len(subset))], nil
+}
+
 // Transcribe sends audio data to a healthy node and returns the transcribed text.
-func (m *Manager) Transcribe(ctx context.Context, pcmData []byte, sampleRate int) (string, error) {
-	node, err := m.getHealthyNode()
+// If pool is provided, it attempts to pick a node from that pool.
+func (m *Manager) Transcribe(ctx context.Context, pcmData []byte, sampleRate int, pool ...[]string) (string, error) {
+	node, err := m.getHealthyNode(pool...)
 	if err != nil {
 		return "", err
 	}
@@ -204,7 +233,8 @@ type StreamSession struct {
 	MinBufferSecs      float64
 	MaxBufferSecs      float64
 	EnergyThreshold    float64
-	
+	Pool               []string
+
 	mu               sync.Mutex
 	inferenceActive  bool
 	inferencePending bool
@@ -241,7 +271,13 @@ func (s *StreamSession) PushAudio(data []byte) {
 		energy := AudioEnergy(data)
 		isSilence := energy < energyThresh 
 
-		if bufferLen >= int(float64(s.SampleRate)*2*maxBuffer) || isSilence { 
+		s.mu.Lock()
+		isFresh := s.StableTranscript == "" && s.SpeculativeTrans == ""
+		s.mu.Unlock()
+
+		// If the buffer is fresh (start of a turn), trigger inference immediately at minBuffer 
+		// without waiting for silence or a larger buffer. This reduces barge-in latency.
+		if isFresh || bufferLen >= int(float64(s.SampleRate)*2*maxBuffer) || isSilence { 
 			s.mu.Lock()
 			if !s.inferenceActive {
 				s.inferenceActive = true
@@ -262,10 +298,17 @@ func (s *StreamSession) runInference() {
 		copy(audio, s.AudioBuffer)
 		pinned := s.PinnedURL
 		sampleRate := s.SampleRate
+		pool := s.Pool
 		s.mu.Unlock()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		text, err := s.Manager.TranscribePinned(ctx, audio, sampleRate, pinned)
+		var text string
+		var err error
+		if pinned != "" {
+			text, err = s.Manager.TranscribePinned(ctx, audio, sampleRate, pinned)
+		} else {
+			text, err = s.Manager.Transcribe(ctx, audio, sampleRate, pool)
+		}
 		cancel()
 
 		if err == nil {
@@ -498,6 +541,57 @@ func Filter(text string) (string, bool) {
 	}
 
 	return text, false
+}
+
+// IsSubstantial returns true if the text contains meaningful content beyond common filler words.
+func IsSubstantial(text string) bool {
+	lower := strings.ToLower(strings.Trim(text, ".,!? "))
+	if lower == "" {
+		return false
+	}
+
+	// List of suppressed filler/noise words
+	fillers := map[string]bool{
+		"uh":    true,
+		"um":    true,
+		"ah":    true,
+		"er":    true,
+		"oh":    true,
+		"ok":    true,
+		"okay":  true,
+		"hmm":   true,
+		"mhm":   true,
+		"yeah":  true,
+		"yes":   true,
+		"yep":   true,
+		"right": true,
+		"well":  true,
+		"so":    true,
+		"like":  true,
+		"just":  true,
+	}
+
+	words := strings.Fields(lower)
+	if len(words) == 0 {
+		return false
+	}
+
+	// If we have more than 2 words, it's likely a real sentence/request
+	if len(words) > 2 {
+		return true
+	}
+
+	// Check if the remaining words are all fillers
+	substantialDetected := false
+	for _, w := range words {
+		clean := strings.Trim(w, ".,!? ")
+		if !fillers[clean] {
+			substantialDetected = true
+			break
+		}
+	}
+
+	return substantialDetected
 }
 
 // AddWavHeader wraps PCM data in a WAV container.

@@ -114,6 +114,7 @@ object SpeaxManager {
     var isGeneratingAi by mutableStateOf(false)
 
     private val httpClient = okhttp3.OkHttpClient()
+    private var pendingTtsText: String? = null
 
     fun fetchModels() {
         if (aiProvider == "gemini" && geminiApiKey.isBlank()) {
@@ -270,6 +271,7 @@ object SpeaxManager {
             put("version", sttVersion)
         }
         speaxWebSocket?.sendText("[SETTINGS]$settingsJson")
+        audioEngine.skipVadInterruption = sttVersion >= 1
     }
 
     fun saveSettingsLocal() {
@@ -376,7 +378,10 @@ object SpeaxManager {
                 if (ws === speaxWebSocket) handleIncomingText(text)
             },
             onAudioReceived = { ws, audioBytes ->
-                if (ws === speaxWebSocket) audioEngine.playAudioChunk(audioBytes, currentTtsSampleRate)
+                if (ws === speaxWebSocket) {
+                    audioEngine.playAudioChunk(audioBytes, currentTtsSampleRate, associatedText = pendingTtsText)
+                    pendingTtsText = null
+                }
             },
             onConnected = { ws ->
                 if (ws === speaxWebSocket) {
@@ -575,6 +580,9 @@ object SpeaxManager {
                             }
                         }
                         val themeObj = s.optJSONObject("theme")
+                        sttVersion = s.optInt("version", sttVersion)
+                        audioEngine.skipVadInterruption = sttVersion >= 1
+
                         if (themeObj != null) {
                             currentTheme = SpeaxThemeData(
                                 primary = themeObj.optString("primary", "#0E639C"),
@@ -601,6 +609,9 @@ object SpeaxManager {
                                 "start" -> {
                                     currentTtsSampleRate = json.optInt("sampleRate", 22050)
                                     Log.d("SpeaxManager", "Remote TTS Start: sampleRate=$currentTtsSampleRate")
+                                }
+                                "text" -> {
+                                    pendingTtsText = json.optString("text")
                                 }
                             }
                         } catch (e: Exception) {
@@ -708,6 +719,11 @@ object SpeaxManager {
                     // Status updates are handled globally, we just consume the message here
                     // to prevent it from falling into the 'else' block and being added to history.
                     Log.d("SpeaxManager", "Whisper status update received")
+                }
+                text == "[STOP_AUDIO]" -> {
+                    Log.d("SpeaxManager", "STOP_AUDIO: Barge-in triggered by server.")
+                    val lastTag = audioEngine.stopAndFlush()
+                    speaxWebSocket?.sendText("[STOPPED_AT]:$lastTag")
                 }
                 text.startsWith("[STT_LIVE]:") -> {
                     val content = text.removePrefix("[STT_LIVE]:").trim()

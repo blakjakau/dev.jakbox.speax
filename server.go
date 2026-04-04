@@ -51,32 +51,41 @@ type FallbackLLMConfig struct {
 	Models []string `json:"Models"`
 }
 
+type AdminConfigOverride struct {
+	WhisperURLs        *[]string                  `json:"WhisperURLs,omitempty"`
+	ModelLimits        *map[string]ModelRateLimit `json:"ModelLimits,omitempty"`
+	SystemPromptGemini *string                    `json:"SystemPromptGemini,omitempty"`
+	SystemPromptOllama *string                    `json:"SystemPromptOllama,omitempty"`
+	MaxTokensGemini    *int                       `json:"MaxTokensGemini,omitempty"`
+	MaxTokensOllama    *int                       `json:"MaxTokensOllama,omitempty"`
+}
+
 type Config struct {
-	WhisperURLs          []string                  `json:"WhisperURLs"`
-	PiperURLs            []string                  `json:"PiperURLs"`
-	PiperBin             string                    `json:"PiperBin"`
-	DefaultVoice         string                    `json:"DefaultVoice"`
-	SampleRate           int                       `json:"SampleRate"`
-	OllamaURLs           []string                  `json:"OllamaURLs"`
-	OllamaChatURL        []string                  `json:"OllamaChatURL"`
-	OllamaModel          string                    `json:"OllamaModel"`
-	WakeWords            []string                  `json:"WakeWords"`
-	PassiveWindowSeconds int                       `json:"PassiveWindowSeconds"`
-	MaxArchiveTurns      int                       `json:"MaxArchiveTurns"`
-	MaxTokensGemini      int                       `json:"MaxTokensGemini"`
-	MaxTokensOllama      int                       `json:"MaxTokensOllama"`
-	SystemPromptGemini   string                    `json:"SystemPromptGemini"`
-	SystemPromptOllama   string                    `json:"SystemPromptOllama"`
-	ToolSystemPrompt     string                    `json:"ToolSystemPrompt"`
-	Admins               []string                  `json:"Admins"`
-	ModelLimits          map[string]ModelRateLimit `json:"ModelLimits"`
-	DefaultLimit         ModelRateLimit            `json:"DefaultLimit"`
-	FallbackLLM          FallbackLLMConfig         `json:"FallbackLLM"`
-	GeminiModels         []string                  `json:"GeminiModels"`
-	OllamaModels         []string                  `json:"OllamaModels"`
-	WhisperMinBuffer      float64                  `json:"WhisperMinBuffer"`
-	WhisperMaxBuffer      float64                  `json:"WhisperMaxBuffer"`
-	WhisperEnergyThreshold float64                 `json:"WhisperEnergyThreshold"`
+	WhisperURLs           []string                  `json:"WhisperURLs"`
+	PiperURLs             []string                  `json:"PiperURLs"`
+	PiperBin              string                    `json:"PiperBin"`
+	DefaultVoice          string                    `json:"DefaultVoice"`
+	SampleRate            int                       `json:"SampleRate"`
+	OllamaURLs            []string                  `json:"OllamaURLs"`
+	OllamaChatURL         []string                  `json:"OllamaChatURL"`
+	OllamaModel           string                    `json:"OllamaModel"`
+	WakeWords             []string                  `json:"WakeWords"`
+	PassiveWindowSeconds  int                       `json:"PassiveWindowSeconds"`
+	MaxArchiveTurns       int                       `json:"MaxArchiveTurns"`
+	MaxTokensGemini       int                       `json:"MaxTokensGemini"`
+	MaxTokensOllama       int                       `json:"MaxTokensOllama"`
+	SystemPromptGemini    string                    `json:"SystemPromptGemini"`
+	SystemPromptOllama    string                    `json:"SystemPromptOllama"`
+	ToolSystemPrompt      string                    `json:"ToolSystemPrompt"`
+	Admins                map[string]AdminConfigOverride `json:"Admins"`
+	ModelLimits           map[string]ModelRateLimit `json:"ModelLimits"`
+	DefaultLimit          ModelRateLimit            `json:"DefaultLimit"`
+	FallbackLLM           FallbackLLMConfig         `json:"FallbackLLM"`
+	GeminiModels          []string                  `json:"GeminiModels"`
+	OllamaModels          []string                  `json:"OllamaModels"`
+	WhisperMinBuffer      float64                   `json:"WhisperMinBuffer"`
+	WhisperMaxBuffer      float64                   `json:"WhisperMaxBuffer"`
+	WhisperEnergyThreshold float64                  `json:"WhisperEnergyThreshold"`
 }
 
 type ModelRateLimit struct {
@@ -127,7 +136,7 @@ var (
 func ollamaModelSupportsTools(model string) bool {
 	low := strings.ToLower(model)
 	// Explicitly block models that are known to struggle with native tool calling in this implementation
-	if strings.Contains(low, "gemma") || strings.Contains(low, "llama") {
+	if strings.Contains(low, "llama") {
 		return false
 	}
 
@@ -392,12 +401,30 @@ func reloadConfig(path string) error {
 	configMutex.Unlock()
 
 	// Initialize/Update STT nodes
+	// We aggregate all possible Whisper URLs (global + admin overrides) so the manager tracks them all.
+	// Individual sessions will then pick their subset from this pool.
+	allWhisperURLs := append([]string{}, newConfig.WhisperURLs...)
+	seenURLs := make(map[string]bool)
+	for _, u := range allWhisperURLs {
+		seenURLs[u] = true
+	}
+	for _, admin := range newConfig.Admins {
+		if admin.WhisperURLs != nil {
+			for _, u := range *admin.WhisperURLs {
+				if !seenURLs[u] {
+					allWhisperURLs = append(allWhisperURLs, u)
+					seenURLs[u] = true
+				}
+			}
+		}
+	}
+
 	if sttManager == nil {
-		sttManager = stt.NewManager(newConfig.WhisperURLs, func(msg string) {
+		sttManager = stt.NewManager(allWhisperURLs, func(msg string) {
 			log.Println(msg)
 		})
 	} else {
-		sttManager.UpdateURLs(newConfig.WhisperURLs)
+		sttManager.UpdateURLs(allWhisperURLs)
 	}
 
 	// Initialize Piper nodes
@@ -696,15 +723,89 @@ type ClientSession struct {
 	Version                  int                    `json:"version"`
 }
 
+// ---- Config Resolvers ---------------------------------------------------
+
+func (s *ClientSession) GetWhisperURLs() []string {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.WhisperURLs != nil {
+			return *override.WhisperURLs
+		}
+	}
+	return config.WhisperURLs
+}
+
+func (s *ClientSession) GetModelLimit(model string) ModelRateLimit {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.ModelLimits != nil {
+			if limit, ok := (*override.ModelLimits)[model]; ok {
+				return limit
+			}
+		}
+	}
+	if limit, ok := config.ModelLimits[model]; ok {
+		return limit
+	}
+	return config.DefaultLimit
+}
+
+func (s *ClientSession) GetSystemPromptGemini() string {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.SystemPromptGemini != nil {
+			return *override.SystemPromptGemini
+		}
+	}
+	return config.SystemPromptGemini
+}
+
+func (s *ClientSession) GetSystemPromptOllama() string {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.SystemPromptOllama != nil {
+			return *override.SystemPromptOllama
+		}
+	}
+	return config.SystemPromptOllama
+}
+
+func (s *ClientSession) GetMaxTokensGemini() int {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.MaxTokensGemini != nil {
+			return *override.MaxTokensGemini
+		}
+	}
+	return config.MaxTokensGemini
+}
+
+func (s *ClientSession) GetMaxTokensOllama() int {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.MaxTokensOllama != nil {
+			return *override.MaxTokensOllama
+		}
+	}
+	return config.MaxTokensOllama
+}
+
+// -------------------------------------------------------------------------
+
 func IsAdminID(id string) bool {
 	configMutex.RLock()
 	defer configMutex.RUnlock()
-	for _, adminID := range config.Admins {
-		if id == adminID {
-			return true
-		}
+	if config.Admins == nil {
+		return false
 	}
-	return false
+	_, ok := config.Admins[id]
+	return ok
 }
 
 func (s *ClientSession) IsAdmin() bool {
@@ -1607,14 +1708,8 @@ func (s *ClientSession) isFallbackModel(model string) bool {
 // If the model has a specific fallback configured, it uses that.
 // If it specifies "[FallbackLLM]" or has no fallback, it returns the global FallbackLLM.
 func (s *ClientSession) resolveFallback(currentModel string) (string, string) {
-	configMutex.RLock()
-	defer configMutex.RUnlock()
-
-	limits, ok := config.ModelLimits[currentModel]
-	fallback := ""
-	if ok {
-		fallback = limits.Fallback
-	}
+	limits := s.GetModelLimit(currentModel)
+	fallback := limits.Fallback
 
 	// Default to global fallback if no specific fallback or [FallbackLLM]
 	if fallback == "" || fallback == "[FallbackLLM]" {
@@ -1660,12 +1755,7 @@ func getMidnightPTBound(now time.Time) time.Time {
 }
 
 func (s *ClientSession) checkRateLimitUnsafe(model string) (string, error) {
-	configMutex.RLock()
-	limits, ok := config.ModelLimits[model]
-	if !ok {
-		limits = config.DefaultLimit
-	}
-	configMutex.RUnlock()
+	limits := s.GetModelLimit(model)
 
 	// If no limits defined at all, allow
 	if limits.RPM <= 0 && limits.TPM <= 0 && limits.RPD <= 0 {
@@ -1746,12 +1836,7 @@ func (s *ClientSession) checkRateLimitUnsafe(model string) (string, error) {
 }
 
 func (s *ClientSession) checkRateLimit(model string) (string, error) {
-	configMutex.RLock()
-	limits, ok := config.ModelLimits[model]
-	if !ok {
-		limits = config.DefaultLimit
-	}
-	configMutex.RUnlock()
+	limits := s.GetModelLimit(model)
 
 	// If no limits defined at all, allow
 	if limits.RPM <= 0 && limits.TPM <= 0 && limits.RPD <= 0 {
@@ -2460,6 +2545,37 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			if strings.HasPrefix(text, "[STOPPED_AT]:") {
+				tag := strings.TrimPrefix(text, "[STOPPED_AT]:")
+				if tag != "null" && tag != "" {
+					session.Mutex.Lock()
+					t := session.ActiveThread()
+					if len(t.History) > 0 {
+						lastMsg := &t.History[len(t.History)-1]
+						if lastMsg.Role == "assistant" {
+							// Find the tag in the content and truncate after it
+							idx := strings.Index(lastMsg.Content, tag)
+							if idx != -1 {
+								log.Printf("[Barge-In] Truncating assistant turn at %s", tag)
+								// Cut after the tag + potentially some whitespace
+								newContent := lastMsg.Content[:idx+len(tag)]
+								lastMsg.Content = newContent + "..."
+								session.Mutex.Unlock()
+								saveSession(session)
+								sendHistory(nil, session)
+							} else {
+								session.Mutex.Unlock()
+							}
+						} else {
+							session.Mutex.Unlock()
+						}
+					} else {
+						session.Mutex.Unlock()
+					}
+				}
+				continue
+			}
+
 			if strings.HasPrefix(text, "[TYPED_PROMPT") || strings.HasPrefix(text, "[TEXT_PROMPT") {
 				closeIdx := strings.Index(text, "]")
 				if closeIdx == -1 {
@@ -2649,7 +2765,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				sampleRate := config.SampleRate
 				configMutex.RUnlock()
 
-				text, err := sttManager.Transcribe(context.Background(), audio, sampleRate)
+				text, err := sttManager.Transcribe(context.Background(), audio, sampleRate, session.GetWhisperURLs())
 
 				if err != nil {
 					if strings.Contains(err.Error(), "all STT nodes are unhealthy") {
@@ -2729,7 +2845,8 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 			configMutex.RUnlock()
 
 			// Select a healthy node for affinity (proper round-robin)
-			pinned, _ := sttManager.PickNode()
+			pool := session.GetWhisperURLs()
+			pinned, _ := sttManager.PickNodeFromPool(pool)
 			pinnedURL := ""
 			if pinned != nil {
 				pinnedURL = pinned.URL
@@ -2738,6 +2855,7 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 			stream = &stt.StreamSession{
 				Manager:         sttManager,
 				PinnedURL:       pinnedURL,
+				Pool:            pool,
 				SampleRate:      sampleRate,
 				MinBufferSecs:   config.WhisperMinBuffer,
 				MaxBufferSecs:   config.WhisperMaxBuffer,
@@ -2745,6 +2863,24 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 				OnUpdate: func(fullTranscript string) {
 					log.Printf("[STT-Live] %d: %s", seqID, fullTranscript)
 					targetWebClients(session, []byte("[STT_LIVE]:"+fullTranscript))
+
+					// Barge-In Trigger: If meaningful words detected, stop any active AI response
+					if stt.IsSubstantial(fullTranscript) {
+						session.Mutex.Lock()
+						activeCancel := session.ActiveCancel
+						session.Mutex.Unlock()
+
+						if activeCancel != nil {
+							log.Printf("[Barge-In] Substantial words detected: '%s'. Interrupting AI.", fullTranscript)
+							// 1. Tell client to stop audio hardware
+							safeWrite(ws, session, websocket.TextMessage, []byte("[STOP_AUDIO]"))
+							// 2. Kill LLM/TTS generation
+							activeCancel()
+							session.Mutex.Lock()
+							session.ActiveCancel = nil
+							session.Mutex.Unlock()
+						}
+					}
 				},
 			}
 			session.STTStreams[int64(seqID)] = stream
@@ -2790,7 +2926,7 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 				sampleRate := config.SampleRate
 				configMutex.RUnlock()
 
-				text, err := sttManager.Transcribe(context.Background(), audio, sampleRate)
+				text, err := sttManager.Transcribe(context.Background(), audio, sampleRate, session.GetWhisperURLs())
 				if err != nil {
 					log.Printf("[STT-Legacy] Transcription failed: %v", err)
 					safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
@@ -3356,14 +3492,12 @@ func getSystemStatusPrompt(session *ClientSession, provider string) string {
 }
 
 func prepareSystemPrompt(session *ClientSession, model, voiceName, provider string) string {
-	configMutex.RLock()
 	var basePrompt string
 	if provider == "gemini" {
-		basePrompt = config.SystemPromptGemini
+		basePrompt = session.GetSystemPromptGemini()
 	} else {
-		basePrompt = config.SystemPromptOllama
+		basePrompt = session.GetSystemPromptOllama()
 	}
-	configMutex.RUnlock()
 
 	// 1. Get persona
 	personaName := strings.ToLower(extractVoiceName(voiceName))
@@ -4188,7 +4322,8 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	close(ttsChan)
 	wg.Wait()
 
-	if ctx.Err() == nil {
+	// Capture the final state even if the context was cancelled (Barge-In case)
+	if ctx.Err() == nil || fullResponse.Len() > 0 {
 		session.Mutex.Lock()
 		t := session.ActiveThread()
 		if !strings.HasPrefix(prompt, "[") {
@@ -4198,18 +4333,21 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		if finalResp != "" {
 			session.appendMessage("assistant", finalResp, t)
 		}
-		if len(t.History) > 30 {
-			toSummarize := make([]ChatMessage, 10)
-			copy(toSummarize, t.History[:10])
-			t.Archive = append(t.Archive, toSummarize...)
-			t.History = t.History[10:]
-			go generateSummaryAsync(toSummarize, t.ID, session)
+		
+		// Only perform maintenance if the turn completed naturally
+		if ctx.Err() == nil {
+			if len(t.History) > 30 {
+				toSummarize := make([]ChatMessage, 10)
+				copy(toSummarize, t.History[:10])
+				t.Archive = append(t.Archive, toSummarize...)
+				t.History = t.History[10:]
+				go generateSummaryAsync(toSummarize, t.ID, session)
+			}
 		}
 		session.Mutex.Unlock()
 
-		if sessionTokens > 0 {
+		if sessionTokens > 0 && ctx.Err() == nil {
 			trackTokens(session, model, sessionTokens)
-			// Fall back to total/2 split if Gemini didn't send per-part counts
 			pTok := sessionPromptTokens
 			rTok := sessionRespTokens
 			if pTok == 0 && rTok == 0 {
@@ -4647,7 +4785,8 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	close(ttsChan)
 	wg.Wait()
 
-	if ctx.Err() == nil {
+	// Capture the final state even if the context was cancelled (Barge-In case)
+	if ctx.Err() == nil || fullResponse.Len() > 0 {
 		session.Mutex.Lock()
 		t := session.ActiveThread()
 		if !strings.HasPrefix(prompt, "[") {
@@ -4657,12 +4796,16 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		if finalResp != "" {
 			session.appendMessage("assistant", finalResp, t)
 		}
-		if len(t.History) > 30 {
-			toSummarize := make([]ChatMessage, 10)
-			copy(toSummarize, t.History[:10])
-			t.Archive = append(t.Archive, toSummarize...)
-			t.History = t.History[10:]
-			go generateSummaryAsync(toSummarize, t.ID, session)
+
+		// Only perform maintenance if the turn completed naturally
+		if ctx.Err() == nil {
+			if len(t.History) > 30 {
+				toSummarize := make([]ChatMessage, 10)
+				copy(toSummarize, t.History[:10])
+				t.Archive = append(t.Archive, toSummarize...)
+				t.History = t.History[10:]
+				go generateSummaryAsync(toSummarize, t.ID, session)
+			}
 		}
 		session.Mutex.Unlock()
 		saveSession(session)
