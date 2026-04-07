@@ -152,7 +152,7 @@
 		"voice_file": "jenny-medium.onnx",
 		"voice_file_mobile": "jenny-medium.onnx",
 
-		"voice_length_scale": 0.75,
+		"voice_length_scale": 0.9,
 		"voice_noise_scale": 1.2,
 		"voice_noise_w": 0.95,
 		"voice_variance": 0.125,

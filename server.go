@@ -62,17 +62,20 @@ type FallbackLLMConfig struct {
 }
 
 type AdminConfigOverride struct {
-	WhisperURLs        *[]string                  `json:"WhisperURLs,omitempty"`
-	ModelLimits        *map[string]ModelRateLimit `json:"ModelLimits,omitempty"`
-	SystemPromptGemini *string                    `json:"SystemPromptGemini,omitempty"`
-	SystemPromptOllama *string                    `json:"SystemPromptOllama,omitempty"`
-	MaxTokensGemini    *int                       `json:"MaxTokensGemini,omitempty"`
-	MaxTokensOllama    *int                       `json:"MaxTokensOllama,omitempty"`
+	STTServers           *[]string                  `json:"STTServers,omitempty"`
+	TTSServers           *[]string                  `json:"TTSServers,omitempty"`
+	ModelLimits          *map[string]ModelRateLimit `json:"ModelLimits,omitempty"`
+	SystemPromptGemini   *string                    `json:"SystemPromptGemini,omitempty"`
+	SystemPromptOllama   *string                    `json:"SystemPromptOllama,omitempty"`
+	MaxTokensGemini      *int                       `json:"MaxTokensGemini,omitempty"`
+	MaxTokensOllama      *int                       `json:"MaxTokensOllama,omitempty"`
+	PassiveWindowSeconds *int                       `json:"PassiveWindowSeconds,omitempty"`
+	WakeWords            *[]string                  `json:"WakeWords,omitempty"`
 }
 
 type Config struct {
-	WhisperURLs           []string                  `json:"WhisperURLs"`
-	PiperURLs             []string                  `json:"PiperURLs"`
+	STTServers            []string                  `json:"STTServers"`
+	TTSServers            []string                  `json:"TTSServers"`
 	PiperBin              string                    `json:"PiperBin"`
 	DefaultVoice          string                    `json:"DefaultVoice"`
 	SampleRate            int                       `json:"SampleRate"`
@@ -93,9 +96,9 @@ type Config struct {
 	FallbackLLM           FallbackLLMConfig         `json:"FallbackLLM"`
 	GeminiModels          []string                  `json:"GeminiModels"`
 	OllamaModels          []string                  `json:"OllamaModels"`
-	WhisperMinBuffer      float64                   `json:"WhisperMinBuffer"`
-	WhisperMaxBuffer      float64                   `json:"WhisperMaxBuffer"`
-	WhisperEnergyThreshold float64                  `json:"WhisperEnergyThreshold"`
+	STTMinBuffer          float64                   `json:"STTMinBuffer"`
+	STTMaxBuffer          float64                   `json:"STTMaxBuffer"`
+	STTEnergyThreshold    float64                  `json:"STTEnergyThreshold"`
 	VerboseLogging         bool                     `json:"VerboseLogging"`
 }
 
@@ -107,8 +110,8 @@ type ModelRateLimit struct {
 }
 
 func (c *Config) Validate() error {
-	if len(c.WhisperURLs) == 0 {
-		return fmt.Errorf("WhisperURLs cannot be empty")
+	if len(c.STTServers) == 0 {
+		return fmt.Errorf("STTServers cannot be empty")
 	}
 	if len(c.OllamaURLs) == 0 {
 		return fmt.Errorf("OllamaURLs cannot be empty")
@@ -129,7 +132,7 @@ var (
 
 var (
 	sttManager      *stt.Manager
-	piperIndex      uint32
+	ttsIndex        uint32
 	ollamaIndex     uint32
 	ollamaChatIndex uint32
 )
@@ -360,30 +363,37 @@ type PiperNode struct {
 }
 
 var (
-	piperNodes      []*PiperNode
-	piperNodesMutex sync.RWMutex
+	ttsNodes      []*PiperNode
+	ttsNodesMutex sync.RWMutex
 )
 
-var ErrNoPiperNodes = fmt.Errorf("no Piper service nodes available")
+var ErrNoTTSNodes = fmt.Errorf("no TTS service nodes available")
 
-func getHealthyPiperNode() (*PiperNode, error) {
-	piperNodesMutex.RLock()
-	defer piperNodesMutex.RUnlock()
+func (s *ClientSession) getHealthyTTSNode() (*PiperNode, error) {
+	ttsNodesMutex.RLock()
+	defer ttsNodesMutex.RUnlock()
 
-	numNodes := len(piperNodes)
+	numNodes := len(ttsNodes)
 	if numNodes == 0 {
-		return nil, ErrNoPiperNodes
+		return nil, ErrNoTTSNodes
 	}
 
+	allowedPool := s.GetTTSServers()
+	allowedMap := make(map[string]bool)
+	for _, u := range allowedPool {
+		allowedMap[u] = true
+	}
+
+	// Try all nodes, but only pick from our session's allowed pool
 	for i := 0; i < numNodes; i++ {
-		idx := atomic.AddUint32(&piperIndex, 1) - 1
-		node := piperNodes[idx%uint32(numNodes)]
-		if !node.Zombie {
+		idx := atomic.AddUint32(&ttsIndex, 1) - 1
+		node := ttsNodes[idx%uint32(numNodes)]
+		if !node.Zombie && allowedMap[node.URL] {
 			return node, nil
 		}
 	}
 
-	return nil, ErrNoPiperNodes
+	return nil, ErrNoTTSNodes
 }
 
 func getNextURL(urls []string, index *uint32) string {
@@ -412,48 +422,63 @@ func reloadConfig(path string) error {
 	configMutex.Unlock()
 
 	// Initialize/Update STT nodes
-	// We aggregate all possible Whisper URLs (global + admin overrides) so the manager tracks them all.
-	// Individual sessions will then pick their subset from this pool.
-	allWhisperURLs := append([]string{}, newConfig.WhisperURLs...)
-	seenURLs := make(map[string]bool)
-	for _, u := range allWhisperURLs {
-		seenURLs[u] = true
+	allSTTServers := append([]string{}, newConfig.STTServers...)
+	seenSTT := make(map[string]bool)
+	for _, u := range allSTTServers {
+		seenSTT[u] = true
 	}
 	for _, admin := range newConfig.Admins {
-		if admin.WhisperURLs != nil {
-			for _, u := range *admin.WhisperURLs {
-				if !seenURLs[u] {
-					allWhisperURLs = append(allWhisperURLs, u)
-					seenURLs[u] = true
+		if admin.STTServers != nil {
+			for _, u := range *admin.STTServers {
+				if !seenSTT[u] {
+					allSTTServers = append(allSTTServers, u)
+					seenSTT[u] = true
 				}
 			}
 		}
 	}
 
 	if sttManager == nil {
-		sttManager = stt.NewManager(allWhisperURLs, func(msg string) {
+		sttManager = stt.NewManager(allSTTServers, func(msg string) {
 			log.Println(msg)
 		})
 	} else {
-		sttManager.UpdateURLs(allWhisperURLs)
+		sttManager.UpdateURLs(allSTTServers)
 	}
 
-	// Initialize Piper nodes
-	piperNodesMutex.Lock()
-	existingPiperNodes := make(map[string]*PiperNode)
-	for _, node := range piperNodes {
-		existingPiperNodes[node.URL] = node
+	// Initialize/Update TTS nodes
+	ttsNodesMutex.Lock()
+	existingTTSNodes := make(map[string]*PiperNode)
+	for _, node := range ttsNodes {
+		existingTTSNodes[node.URL] = node
 	}
-	var newPiperNodes []*PiperNode
-	for _, url := range newConfig.PiperURLs {
-		if node, exists := existingPiperNodes[url]; exists {
-			newPiperNodes = append(newPiperNodes, node)
-		} else {
-			newPiperNodes = append(newPiperNodes, &PiperNode{URL: url, Zombie: false})
+	
+	allTTSServers := append([]string{}, newConfig.TTSServers...)
+	seenTTS := make(map[string]bool)
+	for _, u := range allTTSServers {
+		seenTTS[u] = true
+	}
+	for _, admin := range newConfig.Admins {
+		if admin.TTSServers != nil {
+			for _, u := range *admin.TTSServers {
+				if !seenTTS[u] {
+					allTTSServers = append(allTTSServers, u)
+					seenTTS[u] = true
+				}
+			}
 		}
 	}
-	piperNodes = newPiperNodes
-	piperNodesMutex.Unlock()
+
+	var newTTSNodes []*PiperNode
+	for _, url := range allTTSServers {
+		if node, exists := existingTTSNodes[url]; exists {
+			newTTSNodes = append(newTTSNodes, node)
+		} else {
+			newTTSNodes = append(newTTSNodes, &PiperNode{URL: url, Zombie: false})
+		}
+	}
+	ttsNodes = newTTSNodes
+	ttsNodesMutex.Unlock()
 
 	// Refresh all sessions' admin cache
 	activeSessionsMutex.Lock()
@@ -781,15 +806,26 @@ type SystemPromptData struct {
 
 // ---- Config Resolvers ---------------------------------------------------
 
-func (s *ClientSession) GetWhisperURLs() []string {
+func (s *ClientSession) GetSTTServers() []string {
 	configMutex.RLock()
 	defer configMutex.RUnlock()
 	if override, ok := config.Admins[s.ClientID]; ok {
-		if override.WhisperURLs != nil {
-			return *override.WhisperURLs
+		if override.STTServers != nil {
+			return *override.STTServers
 		}
 	}
-	return config.WhisperURLs
+	return config.STTServers
+}
+
+func (s *ClientSession) GetTTSServers() []string {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.TTSServers != nil {
+			return *override.TTSServers
+		}
+	}
+	return config.TTSServers
 }
 
 func (s *ClientSession) GetModelLimit(model string) ModelRateLimit {
@@ -850,6 +886,28 @@ func (s *ClientSession) GetMaxTokensOllama() int {
 		}
 	}
 	return config.MaxTokensOllama
+}
+
+func (s *ClientSession) GetPassiveWindowSeconds() int {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.PassiveWindowSeconds != nil {
+			return *override.PassiveWindowSeconds
+		}
+	}
+	return config.PassiveWindowSeconds
+}
+
+func (s *ClientSession) GetWakeWords() []string {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.WakeWords != nil {
+			return *override.WakeWords
+		}
+	}
+	return config.WakeWords
 }
 
 // -------------------------------------------------------------------------
@@ -1183,10 +1241,8 @@ func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Ti
 	}
 
 	lowerPrompt := strings.ToLower(prompt)
-	configMutex.RLock()
-	wakeWords := config.WakeWords
-	passiveWindowSeconds := config.PassiveWindowSeconds
-	configMutex.RUnlock()
+	wakeWords := session.GetWakeWords()
+	passiveWindowSeconds := session.GetPassiveWindowSeconds()
 
 	// Check persona-specific wake words (Name and Mutations)
 	session.Mutex.Lock()
@@ -2151,13 +2207,7 @@ func (s *ClientSession) checkRateLimit(model string) (string, error) {
 }
 
 func (s *ClientSession) getRateLimitUsageUnsafe(model string) (rpm, rpd int, tpm int64, limits ModelRateLimit, hasUsage bool) {
-	configMutex.RLock()
-	limits, ok := config.ModelLimits[model]
-	if !ok {
-		limits = config.DefaultLimit
-	}
-	configMutex.RUnlock()
-
+	limits = s.GetModelLimit(model)
 	usage, ok := s.ModelUsage[model]
 	if !ok {
 		return 0, 0, 0, limits, false
@@ -3015,7 +3065,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				sampleRate := config.SampleRate
 				configMutex.RUnlock()
 
-				text, err := sttManager.Transcribe(context.Background(), audio, sampleRate, session.GetWhisperURLs())
+				text, err := sttManager.Transcribe(context.Background(), audio, sampleRate, session.GetSTTServers())
 
 				if err != nil {
 					if strings.Contains(err.Error(), "all STT nodes are unhealthy") {
@@ -3111,7 +3161,7 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 			configMutex.RUnlock()
 
 			// Select a healthy node for affinity (proper round-robin)
-			pool := session.GetWhisperURLs()
+			pool := session.GetSTTServers()
 			pinned, _ := sttManager.PickNodeFromPool(pool)
 			pinnedURL := ""
 			if pinned != nil {
@@ -3124,9 +3174,9 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 				PinnedURL:       pinnedURL,
 				Pool:            pool,
 				SampleRate:      sampleRate,
-				MinBufferSecs:   config.WhisperMinBuffer,
-				MaxBufferSecs:   config.WhisperMaxBuffer,
-				EnergyThreshold: config.WhisperEnergyThreshold,
+				MinBufferSecs:   config.STTMinBuffer,
+				MaxBufferSecs:   config.STTMaxBuffer,
+				EnergyThreshold: config.STTEnergyThreshold,
 				OnUpdate: func(fullTranscript string) {
 					if !loggedInitial && fullTranscript != "" {
 						words := strings.Fields(fullTranscript)
@@ -3203,7 +3253,7 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 				sampleRate := config.SampleRate
 				configMutex.RUnlock()
 
-				text, err := sttManager.Transcribe(context.Background(), audio, sampleRate, session.GetWhisperURLs())
+				text, err := sttManager.Transcribe(context.Background(), audio, sampleRate, session.GetSTTServers())
 				if err != nil {
 					log.Printf("[STT-Legacy] Transcription failed: %v", err)
 					safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
@@ -4674,16 +4724,16 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		session.Mutex.Unlock()
 
 		if clientVersion >= 1 {
-			if node, err := getHealthyPiperNode(); err == nil {
-				log.Printf("[Gemini TTS Worker] version %d detected. Connecting to remote piper-service at %s", clientVersion, node.URL)
+			if node, err := session.getHealthyTTSNode(); err == nil {
+				log.Printf("[Gemini TTS Worker] version %d detected. Connecting to remote TTS server at %s", clientVersion, node.URL)
 				rp, rpErr = tts.NewRemotePiper(node.URL)
 				if rpErr != nil {
-					log.Printf("[Gemini TTS Worker] failed to connect to remote piper: %v", rpErr)
+					log.Printf("[Gemini TTS Worker] failed to connect to remote TTS: %v", rpErr)
 				} else {
 					defer rp.Close()
 				}
 			} else {
-				log.Printf("[Gemini TTS Worker] version %d detected but no healthy piper nodes found. Falling back to local.", clientVersion)
+				log.Printf("[Gemini TTS Worker] version %d detected but no healthy TTS nodes found. Falling back to local.", clientVersion)
 			}
 		}
 
@@ -5161,16 +5211,16 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		session.Mutex.Unlock()
 
 		if clientVersion >= 1 {
-			if node, err := getHealthyPiperNode(); err == nil {
-				log.Printf("[Ollama TTS Worker] version %d detected. Connecting to remote piper-service at %s", clientVersion, node.URL)
+			if node, err := session.getHealthyTTSNode(); err == nil {
+				log.Printf("[Ollama TTS Worker] version %d detected. Connecting to remote TTS server at %s", clientVersion, node.URL)
 				rp, rpErr = tts.NewRemotePiper(node.URL)
 				if rpErr != nil {
-					log.Printf("[Ollama TTS Worker] failed to connect to remote piper: %v", rpErr)
+					log.Printf("[Ollama TTS Worker] failed to connect to remote TTS: %v", rpErr)
 				} else {
 					defer rp.Close()
 				}
 			} else {
-				log.Printf("[Ollama TTS Worker] version %d detected but no healthy piper nodes found. Falling back to local.", clientVersion)
+				log.Printf("[Ollama TTS Worker] version %d detected but no healthy TTS nodes found. Falling back to local.", clientVersion)
 			}
 		}
 
@@ -5978,16 +6028,16 @@ func handlePerformanceMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	perfMetricsMu.Lock()
-	piperNodesMutex.RLock()
+	ttsNodesMutex.RLock()
 	
 	resp := map[string]interface{}{
 		"llm":          perfMetrics,
 		"sttStatus":    sttManager.GetStatus(),
-		"piperNodes":   piperNodes,
+		"ttsNodes":     ttsNodes,
 	}
 	data, err := json.MarshalIndent(resp, "", "  ")
 	
-	piperNodesMutex.RUnlock()
+	ttsNodesMutex.RUnlock()
 	perfMetricsMu.Unlock()
 	
 	if err != nil {
@@ -6008,9 +6058,9 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	sttStatus := sttManager.GetStatus()
 
-	piperNodesMutex.RLock()
-	ttsStatus := make([]map[string]interface{}, len(piperNodes))
-	for i, node := range piperNodes {
+	ttsNodesMutex.RLock()
+	ttsStatus := make([]map[string]interface{}, len(ttsNodes))
+	for i, node := range ttsNodes {
 		ttsStatus[i] = map[string]interface{}{
 			"url":            node.URL,
 			"healthy":        !node.Zombie,
@@ -6019,7 +6069,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 			"failureCount":   node.FailureCount,
 		}
 	}
-	piperNodesMutex.RUnlock()
+	ttsNodesMutex.RUnlock()
 
 	resp := map[string]interface{}{
 		"stt": sttStatus,

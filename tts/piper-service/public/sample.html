@@ -333,6 +333,7 @@
 
             <div class="actions">
                 <div id="latency-display" style="flex-grow: 1; font-size: 0.85rem; color: var(--secondary);"></div>
+                <button class="secondary" id="downloadBtn" disabled>Download</button>
                 <button class="secondary" id="stopBtn" disabled>Stop</button>
                 <button class="primary" id="synthBtn" disabled>Synthesize</button>
             </div>
@@ -372,6 +373,7 @@
         const annotatedBtn = document.getElementById('annotatedBtn');
         const synthBtn = document.getElementById('synthBtn');
         const stopBtn = document.getElementById('stopBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
         const textInput = document.getElementById('text-input');
         const canvas = document.getElementById('visualizer');
         const ctx_canvas = canvas.getContext('2d');
@@ -509,6 +511,50 @@
         let animationId = null;
         let activeSources = [];
         let isStopped = false;
+        let currentAudioFrames = [];
+        let currentAudioBlobUrl = null;
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+        function createWavBlob(framesArray, sampleRate) {
+            let totalLength = 0;
+            framesArray.forEach(f => totalLength += f.length);
+            const buffer = new ArrayBuffer(44 + totalLength * 2);
+            const view = new DataView(buffer);
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, 36 + totalLength * 2, true);
+            writeString(view, 8, 'WAVE');
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            writeString(view, 36, 'data');
+            view.setUint32(40, totalLength * 2, true);
+            let offset = 44;
+            for (let i = 0; i < framesArray.length; i++) {
+                const chunk = framesArray[i];
+                for (let j = 0; j < chunk.length; j++, offset += 2) {
+                    view.setInt16(offset, chunk[j], true);
+                }
+            }
+            return new Blob([view], { type: 'audio/wav' });
+        }
+
+        downloadBtn.onclick = () => {
+            if (!currentAudioBlobUrl) return;
+            const a = document.createElement('a');
+            a.href = currentAudioBlobUrl;
+            a.download = 'piper-tts.wav';
+            a.click();
+        };
 
         function stopAudio() {
             log("Stopping and muting stream...");
@@ -625,6 +671,12 @@
                             pendingText = data.text;
                         } else if (data.type === 'end') {
                             log("Stream completed (End reached)");
+                            if (currentAudioFrames.length > 0) {
+                                const wavBlob = createWavBlob(currentAudioFrames, window.currentSampleRate || 22050);
+                                if (currentAudioBlobUrl) URL.revokeObjectURL(currentAudioBlobUrl);
+                                currentAudioBlobUrl = URL.createObjectURL(wavBlob);
+                                downloadBtn.disabled = false;
+                            }
                         }
                     } catch(e) {
                         log(`Received text: ${event.data}`);
@@ -638,6 +690,7 @@
                 const elapsed = Math.round(performance.now() - audioStartTime);
                 const data = event.data;
                 const pcmData = new Int16Array(data);
+                currentAudioFrames.push(pcmData);
                 
                 latencyDisplay.textContent = `Completed in ${elapsed}ms (WS)`;
                 log(`Success: Received audio stream chunk (${pcmData.length} samples).`);
@@ -704,9 +757,16 @@
             const mode = modeSelect.value;
 
             synthBtn.disabled = true;
+            downloadBtn.disabled = true;
             latencyDisplay.textContent = 'Synthesizing...';
             audioStartTime = performance.now();
             isStopped = false;
+            
+            currentAudioFrames = [];
+            if (currentAudioBlobUrl) {
+                URL.revokeObjectURL(currentAudioBlobUrl);
+                currentAudioBlobUrl = null;
+            }
             
             // Note: We don't reset nextPlayTime here if there's already active audio,
             // unless the user explicitly clicks STOP. 
@@ -750,6 +810,11 @@
                     });
                     const blob = await res.blob();
                     const url = URL.createObjectURL(blob);
+                    
+                    if (currentAudioBlobUrl) URL.revokeObjectURL(currentAudioBlobUrl);
+                    currentAudioBlobUrl = url;
+                    downloadBtn.disabled = false;
+                    
                     const audio = new Audio(url);
                     audio.play();
                     stopBtn.disabled = false;
