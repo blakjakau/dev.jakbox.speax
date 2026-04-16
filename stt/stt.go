@@ -131,8 +131,12 @@ func (m *Manager) PickNodeFromPool(pool []string) (*Node, error) {
 }
 
 // Transcribe sends audio data to a healthy node and returns the transcribed text.
-// If pool is provided, it attempts to pick a node from that pool.
+// Enforces a strict 8.0-second maximum cap on sent audio by taking the latest tail if larger.
 func (m *Manager) Transcribe(ctx context.Context, pcmData []byte, sampleRate int, pool ...[]string) (string, error) {
+	maxBytes := int(float64(sampleRate) * 2 * 8.0)
+	if len(pcmData) > maxBytes {
+		pcmData = pcmData[len(pcmData)-maxBytes:]
+	}
 	node, err := m.getHealthyNode(pool...)
 	if err != nil {
 		return "", err
@@ -141,7 +145,12 @@ func (m *Manager) Transcribe(ctx context.Context, pcmData []byte, sampleRate int
 }
 
 // TranscribePinned sends audio data to a SPECIFIC node (for server affinity) and returns the transcribed text.
+// Enforces a strict 8.0-second maximum cap on sent audio by taking the latest tail if larger.
 func (m *Manager) TranscribePinned(ctx context.Context, pcmData []byte, sampleRate int, pinnedURL string) (string, error) {
+	maxBytes := int(float64(sampleRate) * 2 * 8.0)
+	if len(pcmData) > maxBytes {
+		pcmData = pcmData[len(pcmData)-maxBytes:]
+	}
 	if len(pcmData) == 0 {
 		return "", fmt.Errorf("empty audio data")
 	}
@@ -235,6 +244,9 @@ type StreamSession struct {
 	EnergyThreshold    float64
 	Pool               []string
 
+	UseRollingWindow   bool
+	lastSentEndIdx     int
+
 	mu               sync.Mutex
 	inferenceActive  bool
 	inferencePending bool
@@ -251,11 +263,8 @@ func (s *StreamSession) PushAudio(data []byte) {
 	s.AudioBuffer = append(s.AudioBuffer, data...)
 	bufferLen := len(s.AudioBuffer)
 	
-	if s.inferenceActive {
-		s.inferencePending = true
-		s.mu.Unlock()
-		return
-	}
+	// We will evaluate trigger conditions directly instead of blindly setting pending.
+	// We still need to block overlapping go-routines, but inferencePending controls the loop.
 	s.mu.Unlock()
 
 	// Heuristic: Trigger inference every X seconds of new audio
@@ -275,17 +284,47 @@ func (s *StreamSession) PushAudio(data []byte) {
 		isFresh := s.StableTranscript == "" && s.SpeculativeTrans == ""
 		s.mu.Unlock()
 
-		// If the buffer is fresh (start of a turn), trigger inference immediately at minBuffer 
-		// without waiting for silence or a larger buffer. This reduces barge-in latency.
-		if isFresh || bufferLen >= int(float64(s.SampleRate)*2*maxBuffer) || isSilence { 
+		if s.UseRollingWindow {
+			overlapBytes := int(float64(s.SampleRate) * 2 * 3.0)
+			
 			s.mu.Lock()
-			if !s.inferenceActive {
-				s.inferenceActive = true
-				s.mu.Unlock()
-				go s.runInference()
-			} else {
-				s.inferencePending = true
-				s.mu.Unlock()
+			nextStart := s.lastSentEndIdx - overlapBytes
+			if nextStart < 0 {
+				nextStart = 0
+			}
+			
+			requiredBytes := int(float64(s.SampleRate) * 2 * minBuffer)
+			// Ensure strict 5s stride (8s window - 3s overlap) by stepping forward nextStart + 8.0
+			if s.lastSentEndIdx > 0 {
+				requiredBytes = nextStart + int(float64(s.SampleRate) * 2 * 8.0)
+			}
+			s.mu.Unlock()
+
+			if bufferLen >= requiredBytes || isSilence {
+				s.mu.Lock()
+				if !s.inferenceActive {
+					s.inferenceActive = true
+					s.mu.Unlock()
+					go s.runInference()
+				} else {
+					s.inferencePending = true
+					s.mu.Unlock()
+				}
+			}
+		} else {
+			// Legacy unbounded logic:
+			// If the buffer is fresh (start of a turn), trigger inference immediately at minBuffer 
+			// without waiting for silence or a larger buffer. This reduces barge-in latency.
+			if isFresh || bufferLen >= int(float64(s.SampleRate)*2*maxBuffer) || isSilence { 
+				s.mu.Lock()
+				if !s.inferenceActive {
+					s.inferenceActive = true
+					s.mu.Unlock()
+					go s.runInference()
+				} else {
+					s.inferencePending = true
+					s.mu.Unlock()
+				}
 			}
 		}
 	}
@@ -294,8 +333,46 @@ func (s *StreamSession) PushAudio(data []byte) {
 func (s *StreamSession) runInference() {
 	for {
 		s.mu.Lock()
-		audio := make([]byte, len(s.AudioBuffer))
-		copy(audio, s.AudioBuffer)
+		audioSlice := s.AudioBuffer
+		var isRolling bool
+
+		if s.UseRollingWindow {
+			overlapBytes := int(float64(s.SampleRate) * 2 * 3.0)
+			nextStart := s.lastSentEndIdx - overlapBytes
+			if nextStart < 0 {
+				nextStart = 0
+			}
+			// Only take exactly up to 8 seconds
+			endLimit := nextStart + int(float64(s.SampleRate) * 2 * 8.0)
+			if endLimit > len(s.AudioBuffer) {
+				// Don't expand partially if we're rolling! If we are rolling, we should ideally wait for the full 8s segment.
+				// However, if we're triggered by silence, we can send the partial.
+				endLimit = len(s.AudioBuffer)
+			}
+			
+			// Strictly enforce that we do NOT send tiny identical blocks. We only roll if we've accumulated meaningful new data.
+			if endLimit > s.lastSentEndIdx {
+				audioSlice = s.AudioBuffer[nextStart:endLimit]
+				s.lastSentEndIdx = endLimit
+				isRolling = true
+			}
+		}
+
+		if !isRolling && s.UseRollingWindow {
+			// Fast exit if the loop woke up but doesn't have enough data to form a new block
+			if !s.inferencePending || s.finishing {
+				s.inferenceActive = false
+				s.inferencePending = false
+				s.mu.Unlock()
+				return
+			}
+			s.inferencePending = false
+			s.mu.Unlock()
+			continue
+		}
+
+		audio := make([]byte, len(audioSlice))
+		copy(audio, audioSlice)
 		pinned := s.PinnedURL
 		sampleRate := s.SampleRate
 		pool := s.Pool
@@ -315,7 +392,12 @@ func (s *StreamSession) runInference() {
 			var fullUpdate string
 			s.mu.Lock()
 			// 1. Basic consensus/alignment logic
-			stable, speculative := alignTranscripts(s.SpeculativeTrans, text)
+			var stable, speculative string
+			if isRolling {
+				stable, speculative = alignTranscriptsRolling(s.SpeculativeTrans, text)
+			} else {
+				stable, speculative = alignTranscripts(s.SpeculativeTrans, text)
+			}
 			
 			if stable != "" {
 				if s.StableTranscript != "" {
@@ -365,8 +447,19 @@ func (s *StreamSession) Finish() string {
 	}
 	
 	// Final synchronous call if there's audio left
-	audio := make([]byte, len(s.AudioBuffer))
-	copy(audio, s.AudioBuffer)
+	audioSlice := s.AudioBuffer
+	var isRolling bool
+	if s.UseRollingWindow {
+		startIdx := len(s.AudioBuffer) - int(float64(s.SampleRate) * 2 * 8.0)
+		if startIdx < 0 {
+			startIdx = 0
+		}
+		audioSlice = s.AudioBuffer[startIdx:]
+		isRolling = true
+	}
+
+	audio := make([]byte, len(audioSlice))
+	copy(audio, audioSlice)
 	pinned := s.PinnedURL
 	sampleRate := s.SampleRate
 	
@@ -406,6 +499,19 @@ func (s *StreamSession) Finish() string {
 	// Since Whisper transcribes from the beginning, if the final call 
 	// succeeded, it is more accurate than any partial segment alignment.
 	if text != "" {
+		if isRolling {
+			stable, speculative := alignTranscriptsRolling(s.SpeculativeTrans, text)
+			full := s.StableTranscript
+			if full != "" && stable != "" {
+				full += " "
+			}
+			full += stable
+			if full != "" && speculative != "" {
+				full += " "
+			}
+			full += speculative
+			return full
+		}
 		return text
 	}
 	
@@ -415,6 +521,75 @@ func (s *StreamSession) Finish() string {
 	}
 	full += s.SpeculativeTrans
 	return full
+}
+
+// alignTranscriptsRolling attempts to find a consensus overlap point by starting from the 
+// middle of the new transcript and searching backward. It downweights the last 2 words of 'old'
+// and the first 2 words of 'new' to avoid edge truncation hallucinations.
+func alignTranscriptsRolling(old, new string) (stablePrefix, newSpeculative string) {
+	oldWords := strings.Fields(old)
+	newWords := strings.Fields(new)
+
+	if len(oldWords) == 0 {
+		return "", new
+	}
+	if len(newWords) == 0 {
+		return old, ""
+	}
+
+	bestMatchScore := 0
+	bestOldIndex := -1
+	bestNewIndex := -1
+
+	// Iterate backward from the center of newWords
+	center := len(newWords) / 2
+	if center == 0 && len(newWords) > 0 {
+		center = len(newWords) - 1
+	}
+
+	for i := center; i >= 0; i-- {
+		for j := len(oldWords) - 1; j >= 0; j-- {
+			score := 0
+			for k := 0; i+k < len(newWords) && j+k < len(oldWords); k++ {
+				w1 := strings.Trim(strings.ToLower(newWords[i+k]), ".,!?")
+				w2 := strings.Trim(strings.ToLower(oldWords[j+k]), ".,!?")
+				if w1 == w2 {
+					score++
+				} else {
+					break
+				}
+			}
+
+			reqScore := 2
+			if len(newWords) < 3 || len(oldWords) < 3 {
+				reqScore = 1
+			}
+			
+			// Downweight edges: if the match starts in the first 2 words of new, or the last 2 words of old, require stronger consensus.
+			inDownweightedZone := (i < 2) || (j > len(oldWords)-3)
+			if inDownweightedZone && len(newWords) > 3 && len(oldWords) > 3 {
+				reqScore = 3
+			}
+
+			if score >= reqScore && score > bestMatchScore {
+				bestMatchScore = score
+				bestOldIndex = j
+				bestNewIndex = i
+			}
+		}
+		if bestMatchScore > 0 {
+			break
+		}
+	}
+
+	if bestMatchScore > 0 {
+		stablePrefix = strings.Join(oldWords[:bestOldIndex], " ")
+		newSpeculative = strings.Join(newWords[bestNewIndex:], " ")
+		return stablePrefix, newSpeculative
+	}
+
+	// Fallback to old sliding window match if the new logic didn't find anything
+	return alignTranscripts(old, new)
 }
 
 // alignTranscripts attempts to find a stable prefix between an old speculative result 
