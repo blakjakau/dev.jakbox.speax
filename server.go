@@ -2892,10 +2892,31 @@ func getInternalTools() []Tool {
 
 }
 
+func getAdminInternalTools() []Tool {
+	return []Tool{
+		{
+			Name: "SystemStatus",
+			Actions: []ToolAction{
+				{
+					Name:        "get_status",
+					Description: "Retrieve real-time system health: Whisper STT node latency/failures, active sessions, and connection counts.",
+					Schema: map[string]interface{}{
+						"type":       "object",
+						"properties": map[string]interface{}{},
+					},
+				},
+			},
+		},
+	}
+}
+
 func getNativeToolsGemini(session *ClientSession) []interface{} {
 	var functions []interface{}
 
 	allTools := getInternalTools()
+	if session.IsAdmin() {
+		allTools = append(allTools, getAdminInternalTools()...)
+	}
 	session.Mutex.Lock()
 	for _, t := range session.Tools {
 		allTools = append(allTools, *t)
@@ -2930,6 +2951,9 @@ func getNativeToolsOllama(session *ClientSession) []interface{} {
 	var tools []interface{}
 
 	allTools := getInternalTools()
+	if session.IsAdmin() {
+		allTools = append(allTools, getAdminInternalTools()...)
+	}
 	session.Mutex.Lock()
 	for _, t := range session.Tools {
 		allTools = append(allTools, *t)
@@ -3155,6 +3179,42 @@ func executeNativeToolCall(session *ClientSession, nativeName string, args map[s
 		})
 
 		session.Mutex.Unlock()
+		return
+	}
+
+	if toolName == "SystemStatus" || sanitizeFunctionName("SystemStatus") == toolName {
+		if session.IsAdmin() {
+			session.Mutex.Lock()
+			provider := session.Provider
+			session.Mutex.Unlock()
+
+			statusText := getSystemStatusPrompt(session, provider)
+			if statusText == "" {
+				statusText = "No status data available."
+			}
+
+			session.Mutex.Lock()
+			t := session.ActiveThread()
+			id := session.appendNativeToolCall(nativeName, args, t)
+			result := fmt.Sprintf("{\"status\": \"ok\", \"report\": %q}", statusText)
+			session.appendNativeToolResult(nativeName, result, t, id)
+			if session.ToolDebounceTimer != nil {
+				session.ToolDebounceTimer.Stop()
+			}
+			session.ToolDebounceTimer = time.AfterFunc(1500*time.Millisecond, func() {
+				session.Mutex.Lock()
+				ws := getLastActiveUIConn(session)
+				if ws == nil {
+					session.Mutex.Unlock()
+					return
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				session.ActiveCancel = cancel
+				session.Mutex.Unlock()
+				streamLLMAndTTS(ctx, "[SYSTEM: Tool results received.]", ws, session)
+			})
+			session.Mutex.Unlock()
+		}
 		return
 	}
 
@@ -3591,16 +3651,7 @@ func prepareSystemPrompt(data *SystemPromptData, model, voiceName, provider stri
 		sysContent += fmt.Sprintf("\n- bio: %s", data.UserBio)
 	}
 
-	// 4. Metadata
-	currentTime := time.Now().Format("Monday, January 2, 2006, 15:04 MST")
-	sysContent += fmt.Sprintf("\n\nThe current date and time is: %s.", currentTime)
-
-	// 5. System Status (Unlocked context)
-	if data.IsAdmin {
-		sysContent += getSystemStatusPromptData(data, provider)
-	}
-
-	// 6. Pinned Context Instructions (skip for local models — they rely on structured tools only)
+	// Pinned Context Instructions (skip for local models — they rely on structured tools only)
 	if provider == "gemini" {
 		sysContent += "\n\n### Pinned Context Management\n"
 		sysContent += "You have the ability to 'pin' items (like specific notes or scratchpad entries) to your active context. "
@@ -3637,15 +3688,27 @@ func prepareSystemPrompt(data *SystemPromptData, model, voiceName, provider stri
 
 		if len(sharedMemory) > 0 {
 			sysContent += "\n\n#### Shared Memory\n"
-			for k, v := range sharedMemory {
-				updatedStr := time.Unix(v.Updated, 0).Format("2006-01-02 15:04:05")
+			sharedKeys := make([]string, 0, len(sharedMemory))
+			for k := range sharedMemory {
+				sharedKeys = append(sharedKeys, k)
+			}
+			sort.Strings(sharedKeys)
+			for _, k := range sharedKeys {
+				v := sharedMemory[k]
+				updatedStr := time.Unix(v.Updated, 0).Format("2006-01-02")
 				sysContent += fmt.Sprintf("- %s: %s (updated %s)\n", k, v.Content, updatedStr)
 			}
 		}
 		if len(personaMemory) > 0 {
 			sysContent += fmt.Sprintf("\n\n#### Persona Memory (%s)\n", effectiveAssistantName)
-			for k, v := range personaMemory {
-				updatedStr := time.Unix(v.Updated, 0).Format("2006-01-02 15:04:05")
+			personaKeys := make([]string, 0, len(personaMemory))
+			for k := range personaMemory {
+				personaKeys = append(personaKeys, k)
+			}
+			sort.Strings(personaKeys)
+			for _, k := range personaKeys {
+				v := personaMemory[k]
+				updatedStr := time.Unix(v.Updated, 0).Format("2006-01-02")
 				sysContent += fmt.Sprintf("- %s: %s (updated %s)\n", k, v.Content, updatedStr)
 			}
 		}
@@ -3670,11 +3733,8 @@ func prepareSystemPrompt(data *SystemPromptData, model, voiceName, provider stri
 
 	// 6. Thread Summary
 	if data.ActiveThreadSummary != "" {
-		sysContent += "\n\nContext from earlier in the conversation: " + data.ActiveThreadSummary
+		sysContent += "\n\n[Prior Context]\n" + data.ActiveThreadSummary
 	}
-
-	// 7. Rate Limit Status (Inject at bottom for recency/visibility)
-	sysContent += getRateLimitStatusData(data, model)
 
 	return sysContent
 }
@@ -5504,6 +5564,10 @@ func rebuildSummaryAsync(session *ClientSession) {
 func generateSummaryAsync(messages []ChatMessage, threadID string, session *ClientSession) {
 	var transcript strings.Builder
 	for _, msg := range messages {
+		// Skip structured tool-call/result turns — they add noise and no recall value
+		if msg.ToolCall != nil || msg.ToolResult != nil {
+			continue
+		}
 		transcript.WriteString(fmt.Sprintf("%s: %s\n", msg.Role, msg.Content))
 	}
 
